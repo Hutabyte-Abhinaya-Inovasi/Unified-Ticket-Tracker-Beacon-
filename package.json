@@ -2,9 +2,12 @@
   "name": "unified-incident-intake",
   "version": "1.0.0",
   "type": "module",
-  "main": "index.js",
+  "main": "src/index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "license": "ISC",
   "dependencies": {
