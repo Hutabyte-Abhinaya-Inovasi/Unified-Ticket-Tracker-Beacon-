@@ -11,8 +11,11 @@ const { makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, Disconne
 
 const AUTH_FOLDER = "./auth_info";
 
-const ALLOWED_GROUPS = ["120363425592325094@g.us"];
+const ALLOWED_GROUPS = process.env.WHATSAPP_ALLOWED_GROUPS 
+  ? process.env.WHATSAPP_ALLOWED_GROUPS.split(',').map(id => id.trim()).filter(Boolean)
+  : [];
 
+console.log(`📋 ALLOWED_GROUPS loaded: ${ALLOWED_GROUPS.length} group(s)`);
 let sock = null;
 
 export async function connectWhatsApp() {
