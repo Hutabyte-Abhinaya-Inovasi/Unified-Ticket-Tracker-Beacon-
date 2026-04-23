@@ -69,17 +69,14 @@ function detectByRules(email) {
   return { priority, category };
 }
 
-/**
- * 🔥 ANALYZE EMAIL (HYBRID AI + RULE)
- */
 export async function analyzeEmail(email) {
   const safeBody = limitText(email.body);
   const safeSubject = limitText(email.subject, 200);
 
-  // 🔥 RULE FIRST (HEMAT BIAYA)
+  
   const ruleResult = detectByRules(email);
 
-  // 🔥 JIKA SUDAH JELAS → GA PERLU AI
+  
   if (ruleResult.priority === "CRITICAL") {
     return {
       summary: safeSubject,
