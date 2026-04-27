@@ -15,7 +15,7 @@ export async function generateTicketId() {
 
   // Ambil ticket_id tertinggi hari ini
   const { data, error } = await supabase
-    .from('Unified_Incident_Intake')
+    .from('Unified_Ticket_Tracker ') // Pastikan nama tabel benar
     .select('ticket_id')
     .like('ticket_id', `INC-${dateStr}-%`)
     .order('ticket_id', { ascending: false })
@@ -43,7 +43,7 @@ export async function generateTicketId() {
 export async function saveEmailLog(email, analysis, telegramSent, telegramMessageId = null, telegramChatId = null) {
   const ticketId = await generateTicketId();
 
-  const { error } = await supabase.from('Unified_Incident_Intake').insert([{
+  const { error } = await supabase.from('Unified_Ticket_Tracker').insert([{
     ticket_id: ticketId,
     email_id: email.id || email.messageId || Date.now().toString(),
     from: email.from,
@@ -69,10 +69,10 @@ export async function saveEmailLog(email, analysis, telegramSent, telegramMessag
   return ticketId;        // ← Penting: return ticketId
 }
 
-// ====================== FUNGSI LAIN (Update Status, Get Tickets, dll) ======================
+
 export async function updateIncidentStatus(telegramMessageId, status) {
   const { error } = await supabase
-    .from('Unified_Incident_Intake')
+    .from('Unified_Ticket_Tracker')
     .update({ 
       status,
       resolved_at: status === "Done" ? new Date().toISOString() : null 
@@ -85,7 +85,7 @@ export async function updateIncidentStatus(telegramMessageId, status) {
 // Fungsi get tiket (sudah ada sebelumnya, tetap dipertahankan)
 export async function getTicketsByStatus(status = null) {
   let query = supabase
-    .from('Unified_Incident_Intake')
+    .from('Unified_Ticket_Tracker')
     .select('*')
     .order('processed_at', { ascending: false });
 
@@ -106,7 +106,7 @@ export async function getTicketsByDateRange(days = 7) {
   date.setDate(date.getDate() - days);
 
   const { data, error } = await supabase
-    .from('Unified_Incident_Intake')
+    .from('Unified_Ticket_Tracker')
     .select('*')
     .gte('processed_at', date.toISOString())
     .order('processed_at', { ascending: false });
@@ -122,7 +122,7 @@ export async function searchTickets(keyword) {
   const searchTerm = `%${keyword.toLowerCase()}%`;
 
   const { data, error } = await supabase
-    .from('Unified_Incident_Intake')
+    .from('Unified_Ticket_Tracker')
     .select('*')
     .or(`subject.ilike.${searchTerm},body.ilike.${searchTerm},summary.ilike.${searchTerm},from.ilike.${searchTerm}`)
     .order('processed_at', { ascending: false })
