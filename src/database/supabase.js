@@ -3,7 +3,13 @@
 import { createClient } from '@supabase/supabase-js';
 import { env } from '../config/env.js';
 
-export const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_KEY);
+// Gunakan service_role key untuk backend (sangat direkomendasikan)
+export const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_KEY, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+  },
+});
 
 // ====================== GENERATE TICKET ID ======================
 export async function generateTicketId() {
@@ -13,9 +19,10 @@ export async function generateTicketId() {
   const day = String(now.getDate()).padStart(2, '0');
   const dateStr = `${year}${month}${day}`;
 
-  // Ambil ticket_id tertinggi hari ini
+  console.log(`🔍 Generating ticket ID for date: ${dateStr}`);
+
   const { data, error } = await supabase
-    .from('Unified_Ticket_Tracker ') // Pastikan nama tabel benar
+    .from('Unified_Ticket_Tracker')           // ← Nama tabel BENAR, tanpa spasi
     .select('ticket_id')
     .like('ticket_id', `INC-${dateStr}-%`)
     .order('ticket_id', { ascending: false })
@@ -23,8 +30,10 @@ export async function generateTicketId() {
 
   if (error) {
     console.error("❌ Error generate ticket_id:", error);
-    // Fallback jika error
-    return `INC-${dateStr}-0001`;
+    // Fallback
+    const fallbackId = `INC-${dateStr}-0001`;
+    console.log(`⚠️ Using fallback ticket ID: ${fallbackId}`);
+    return fallbackId;
   }
 
   let sequence = 1;
@@ -37,52 +46,71 @@ export async function generateTicketId() {
     }
   }
 
-  return `INC-${dateStr}-${String(sequence).padStart(4, '0')}`;
+  const newTicketId = `INC-${dateStr}-${String(sequence).padStart(4, '0')}`;
+  console.log(`✅ Generated ticket ID: ${newTicketId}`);
+  return newTicketId;
 }
 
+// ====================== SAVE TICKET ======================
 export async function saveEmailLog(email, analysis, telegramSent, telegramMessageId = null, telegramChatId = null) {
-  const ticketId = await generateTicketId();
+  try {
+    const ticketId = await generateTicketId();
 
-  const { error } = await supabase.from('Unified_Ticket_Tracker').insert([{
-    ticket_id: ticketId,
-    email_id: email.id || email.messageId || Date.now().toString(),
-    from: email.from,
-    subject: email.subject,
-    body: email.body,
-    summary: analysis.summary,
-    category: analysis.category,
-    priority: analysis.priority,
-    source: email.source || "whatsapp",
-    telegram_sent: telegramSent,
-    telegram_message_id: telegramMessageId,
-    telegram_chat_id: telegramChatId,
-    status: telegramSent ? "In Progress" : "Logged (No Action)",
-    processed_at: new Date().toISOString()
-  }]);
+    const payload = {
+      ticket_id: ticketId,
+      email_id: email.id || email.messageId || Date.now().toString(),
+      from: email.from || null,
+      subject: email.subject || null,
+      body: email.body || null,
+      summary: analysis?.summary || null,
+      category: analysis?.category || null,
+      priority: analysis?.priority || 'MEDIUM',
+      source: email.source || "whatsapp",
+      telegram_sent: telegramSent,
+      telegram_message_id: telegramMessageId,
+      telegram_chat_id: telegramChatId,
+      status: telegramSent ? "In Progress" : "Logged (No Action)",
+      processed_at: new Date().toISOString()
+    };
 
-  if (error) {
-    console.error("❌ Gagal simpan log email:", error);
+    const { error } = await supabase
+      .from('Unified_Ticket_Tracker')        // ← Nama tabel BENAR
+      .insert([payload]);
+
+    if (error) {
+      console.error("❌ Gagal simpan log email:", error);
+      console.error("Payload yang dikirim:", payload);
+      return null;
+    }
+
+    console.log(`✅ Ticket berhasil dibuat: ${ticketId}`);
+    return ticketId;
+
+  } catch (err) {
+    console.error("❌ Unexpected error in saveEmailLog:", err);
     return null;
-  } 
-
-  console.log(`✅ Ticket dibuat: ${ticketId}`);
-  return ticketId;        // ← Penting: return ticketId
+  }
 }
 
-
+// ====================== UPDATE STATUS ======================
 export async function updateIncidentStatus(telegramMessageId, status) {
   const { error } = await supabase
     .from('Unified_Ticket_Tracker')
     .update({ 
       status,
-      resolved_at: status === "Done" ? new Date().toISOString() : null 
+      resolved_at: status === "Done" ? new Date().toISOString() : null,
+      updated_at: new Date().toISOString()
     })
     .eq('telegram_message_id', telegramMessageId);
 
-  if (error) console.error("❌ Gagal update status:", error);
+  if (error) {
+    console.error("❌ Gagal update status:", error);
+  } else {
+    console.log(`✅ Status updated to "${status}" for telegram_message_id: ${telegramMessageId}`);
+  }
 }
 
-// Fungsi get tiket (sudah ada sebelumnya, tetap dipertahankan)
+// ====================== QUERY FUNCTIONS ======================
 export async function getTicketsByStatus(status = null) {
   let query = supabase
     .from('Unified_Ticket_Tracker')
