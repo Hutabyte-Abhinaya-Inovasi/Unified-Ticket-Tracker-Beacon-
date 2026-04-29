@@ -16,17 +16,19 @@ const {
 
 const AUTH_FOLDER = "./auth_info";
 
+// Cache untuk menyimpan metadata group (termasuk nama group)
+const groupCache = new Map();
+
 const ALLOWED_GROUPS = new Set([
   "120363021244940257@g.us",
   "628111188176-1519023923@g.us",
-   "628118821733-1553603674@g.us",
-   "628118501322-1540806627@g.us",
-   "628118820105-1549007507@g.us",
+  "628118821733-1553603674@g.us",
+  "628118501322-1540806627@g.us",
+  "628118820105-1549007507@g.us",
 ]);
-//EPC
 
+console.log(`📋 ALLOWED_GROUPS loaded: ${ALLOWED_GROUPS.size} group(s)`);
 
-console.log(`📋 ALLOWED_GROUPS loaded: ${ALLOWED_GROUPS.length} group(s)`);
 let sock = null;
 
 function extractMessageText(msg) {
@@ -56,6 +58,12 @@ function normalizePriority(priority = "") {
 
 function isLowPriority(priority = "") {
   return normalizePriority(priority) === "LOW";
+}
+
+// Helper untuk mendapatkan nama group dari cache
+function getGroupSubject(remoteJid) {
+  const metadata = groupCache.get(remoteJid);
+  return metadata?.subject?.trim() || "Unknown WhatsApp Group";
 }
 
 export async function connectWhatsApp() {
@@ -96,18 +104,18 @@ export async function connectWhatsApp() {
 
         console.log("\n📋 GROUP TERDETEKSI:");
         Object.entries(groups).forEach(([id, group]) => {
-          console.log(`• ${group.subject} -> ${id}`);
+          groupCache.set(id, group);   // Simpan ke cache
+          console.log(`• ${group.subject || 'No Subject'} -> ${id}`);
         });
-      } catch {
-        console.log("⚠️ Gagal load group list");
+      } catch (err) {
+        console.log("⚠️ Gagal load group list:", err.message);
       }
     }
 
     if (connection === "close") {
       const code = lastDisconnect?.error?.output?.statusCode;
 
-      const shouldReconnect =
-        code !== DisconnectReason.loggedOut;
+      const shouldReconnect = code !== DisconnectReason.loggedOut;
 
       console.log(`❌ WA disconnected (${code || "unknown"})`);
 
@@ -117,6 +125,17 @@ export async function connectWhatsApp() {
         setTimeout(connectWhatsApp, 5000);
       } else {
         console.log("🚫 Logged out");
+      }
+    }
+  });
+
+  // Listener untuk update nama group secara real-time
+  sock.ev.on("groups.update", (updates) => {
+    for (const update of updates) {
+      if (update.id && update.subject !== undefined) {
+        const current = groupCache.get(update.id) || {};
+        groupCache.set(update.id, { ...current, ...update });
+        console.log(`🔄 Group subject updated: ${update.subject} (${update.id})`);
       }
     }
   });
@@ -141,17 +160,19 @@ export async function connectWhatsApp() {
       if (!text) return;
 
       console.log("\n📩 WhatsApp Message");
-      console.log(`Group : ${remoteJid}`);
+      console.log(`Group : ${getGroupSubject(remoteJid)}`);
       console.log(`From  : ${senderName}`);
       console.log(`Text  : ${text}`);
 
+      // === BAGIAN YANG SUDAH DIPERBAIKI ===
       const pseudoEmail = {
         id: `wa-${Date.now()}`,
         from: senderName,
-        subject: "WhatsApp Group Message",
+        subject: getGroupSubject(remoteJid),           // ← Nama group sebagai subject
         body: text,
         source: "whatsapp",
-        group_id: remoteJid
+        group_id: remoteJid,
+        group_name: getGroupSubject(remoteJid)         // Tambahan untuk kemudahan
       };
 
       const analysis = await analyzeEmail(pseudoEmail);
