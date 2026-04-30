@@ -14,7 +14,8 @@ import { chatWithAI } from '../ai/openaiService.js';
 
 let bot = null;
 
-export function initTelegramBot() {
+// ================== INIT TELEGRAM BOT ==================
+function initTelegramBot() {
   if (bot) return bot;
 
   if (!env.TG_TOKEN || !env.TG_CHAT_ID) {
