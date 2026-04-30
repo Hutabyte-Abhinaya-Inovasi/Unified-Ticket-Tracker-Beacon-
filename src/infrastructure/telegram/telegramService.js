@@ -317,4 +317,7 @@ async function sendDailySummary(chatId) {
 }
 
 // Export
-export { initTelegramBot, sendIncidentAlert };
+export { 
+  initTelegramBot, 
+  sendIncidentAlert 
+};
