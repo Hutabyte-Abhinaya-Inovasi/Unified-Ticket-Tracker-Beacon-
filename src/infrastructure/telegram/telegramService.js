@@ -8,7 +8,7 @@ import {
   getTicketsByStatus, 
   getTicketsByDateRange, 
   getDailySummary,
-  getTicketById          // ← Ditambahkan
+  getTicketById
 } from '../../database/supabase.js';
 import { chatWithAI } from '../ai/openaiService.js';
 
@@ -294,7 +294,6 @@ Silakan pilih menu:`;
   await bot.sendMessage(msg.chat.id, text, { parse_mode: "Markdown", ...keyboard });
 }
 
-// Placeholder untuk fungsi lain (bisa kamu kembangkan nanti)
 async function showTickets(chatId, status, title) {
   await bot.sendMessage(chatId, `📋 ${title}\n\nFitur ini sedang dikembangkan.`);
 }
@@ -305,18 +304,19 @@ async function showTicketsByDays(chatId, days, title) {
 
 async function sendDailySummary(chatId) {
   const summary = await getDailySummary();
-  const text = `📊 Daily Summary\n\n` +
-    `Tanggal     : ${summary.date}\n` +
-    `Total Tiket : ${summary.total}\n` +
-    `Critical    : ${summary.critical}\n` +
-    `High        : ${summary.high}\n` +
-    `In Progress : ${summary.inProgress}\n` +
-    `Done        : ${summary.done}`;
+  const text = `📊 Daily Summary
+
+Tanggal     : ${summary.date}
+Total Tiket : ${summary.total}
+Critical    : ${summary.critical}
+High        : ${summary.high}
+In Progress : ${summary.inProgress}
+Done        : ${summary.done}`;
 
   await bot.sendMessage(chatId, text);
 }
 
-// Export
+// ================== EXPORTS ==================
 export { 
   initTelegramBot, 
   sendIncidentAlert 
