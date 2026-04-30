@@ -13,7 +13,7 @@ const client = new OpenAI({
 
 const MAX_RETRY = 3;
 
-// ==================== TOOLS / FUNCTION CALLING ====================
+// ==================== TOOLS DEFINITION ====================
 const tools = [
   {
     type: "function",
@@ -88,8 +88,8 @@ async function executeTool(toolCall) {
   }
 }
 
-// ==================== CHAT WITH AI (DENGAN TOOL CALLING) ====================
-export async function chatWithAI(text, context = "") {
+// ==================== CHAT WITH AI ====================
+async function chatWithAI(text, context = "") {
   let messages = [
     {
       role: "system",
@@ -147,7 +147,6 @@ Jika user meminta update/hapus/tampilkan ticket, gunakan tool yang sesuai.`
 async function analyzeEmail(email) {
   const fullText = `${email.subject} ${email.body}`.trim();
   
-  // === STEP 1: Pre-filter Small Talk ===
   if (isSmallTalk(fullText)) {
     console.log("🟡 Pesan diabaikan (small talk):", fullText.substring(0, 60));
     return {
@@ -251,7 +250,6 @@ ${safeBody}
     }
   }
 
-  // Fallback
   return {
     shouldProcess: true,
     isRelevant: true,
@@ -263,7 +261,7 @@ ${safeBody}
   };
 }
 
-// Helper functions untuk analyzeEmail
+// ==================== HELPER FUNCTIONS ====================
 function isSmallTalk(text) {
   const trimmed = text.trim();
   if (!trimmed) return true;
@@ -294,10 +292,7 @@ function limitText(text, max = 2500) {
 }
 
 function cleanJSON(text) {
-  return text
-    .replace(/```json/g, "")
-    .replace(/```/g, "")
-    .trim();
+  return text.replace(/```json/g, "").replace(/```/g, "").trim();
 }
 
 function delay(ms) {
