@@ -14,7 +14,6 @@ const client = new OpenAI({
 const MAX_RETRY = 3;
 
 // ==================== TOOLS / FUNCTION CALLING ====================
-
 const tools = [
   {
     type: "function",
@@ -65,7 +64,6 @@ const tools = [
 ];
 
 // ==================== EXECUTE TOOL ====================
-
 async function executeTool(toolCall) {
   const functionName = toolCall.function.name;
   const args = JSON.parse(toolCall.function.arguments);
@@ -91,7 +89,6 @@ async function executeTool(toolCall) {
 }
 
 // ==================== CHAT WITH AI (DENGAN TOOL CALLING) ====================
-
 export async function chatWithAI(text, context = "") {
   let messages = [
     {
@@ -109,7 +106,7 @@ Jika user meminta update/hapus/tampilkan ticket, gunakan tool yang sesuai.`
   while (attempt < MAX_RETRY) {
     try {
       const response = await client.chat.completions.create({
-        model: "gpt-4o-mini",           // atau gpt-4o jika mau lebih pintar
+        model: "gpt-4o-mini",
         messages: messages,
         tools: tools,
         tool_choice: "auto",
@@ -119,12 +116,9 @@ Jika user meminta update/hapus/tampilkan ticket, gunakan tool yang sesuai.`
 
       const message = response.choices[0]?.message;
 
-      // Jika AI ingin memanggil tool
       if (message.tool_calls && message.tool_calls.length > 0) {
-        // Tambahkan respons AI ke messages
         messages.push(message);
 
-        // Eksekusi setiap tool call
         for (const toolCall of message.tool_calls) {
           const toolResult = await executeTool(toolCall);
 
@@ -134,12 +128,9 @@ Jika user meminta update/hapus/tampilkan ticket, gunakan tool yang sesuai.`
             content: JSON.stringify(toolResult)
           });
         }
-
-        // Panggil AI lagi agar memberikan respons akhir ke user
         continue;
       }
 
-      // Jika tidak ada tool call, kembalikan respons biasa
       return message.content?.trim() || "Maaf, saya tidak mengerti perintah tersebut.";
 
     } catch (err) {
@@ -152,11 +143,8 @@ Jika user meminta update/hapus/tampilkan ticket, gunakan tool yang sesuai.`
   }
 }
 
-// Export analyzeEmail tetap sama seperti sebelumnya (untuk WhatsApp)
-export { analyzeEmail };   // pastikan fungsi analyzeEmail kamu tetap ada di file ini
-// ==================== MAIN FUNCTION ====================
-
-export async function analyzeEmail(email) {
+// ==================== ANALYZE EMAIL (untuk WhatsApp) ====================
+async function analyzeEmail(email) {
   const fullText = `${email.subject} ${email.body}`.trim();
   
   // === STEP 1: Pre-filter Small Talk ===
@@ -178,7 +166,6 @@ export async function analyzeEmail(email) {
   const safeSubject = limitText(email.subject, 300);
   const ruleResult = detectByRules(fullText);
 
-  // Jika CRITICAL → langsung proses tanpa AI (fast path)
   if (ruleResult.priority === "CRITICAL") {
     return {
       shouldProcess: true,
@@ -191,13 +178,12 @@ export async function analyzeEmail(email) {
     };
   }
 
-  // === STEP 2: Gunakan AI untuk analisis lebih dalam ===
   const prompt = `
 Anda adalah AI ITSM yang cerdas dan teliti.
 
 Tugas Anda:
 - Analisis pesan dari WhatsApp Group
-- Tentukan apakah pesan ini **perlu ditindaklanjuti** sebagai tiket ITSM atau hanya obrolan biasa
+- Tentukan apakah pesan ini perlu ditindaklanjuti sebagai tiket ITSM atau hanya obrolan biasa
 - Jika tidak relevan, set "isRelevant": false
 
 Balas HANYA dengan JSON valid ini, tanpa penjelasan tambahan:
@@ -229,7 +215,7 @@ ${safeBody}
           { role: "user", content: prompt }
         ],
         max_tokens: 600,
-        temperature: 0.1,        // lebih rendah = lebih konsisten
+        temperature: 0.1,
       });
 
       let text = response.choices[0]?.message?.content || "";
@@ -276,3 +262,85 @@ ${safeBody}
     response: "Terima kasih, laporan Anda sedang diproses oleh tim kami.",
   };
 }
+
+// Helper functions untuk analyzeEmail
+function isSmallTalk(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  
+  const IRRELEVANT_PATTERNS = [
+    /^hai+$/i, /^halo+$/i, /^hi+$/i, /^hello+$/i,
+    /^terima kasih$/i, /^thanks$/i, /^thank you$/i,
+    /^sama-sama$/i, /^ok$/i, /^oke$/i, /^sip$/i, /^mantap$/i,
+    /^sudah$/i, /^done$/i, /^selesai$/i,
+    /^apa kabar?$/i, /^kabar$/i,
+    /^(ya|iya|betul|benar)$/i,
+  ];
+
+  for (const pattern of IRRELEVANT_PATTERNS) {
+    if (pattern.test(trimmed)) return true;
+  }
+
+  if (trimmed.length < 15) {
+    const technicalWords = /(server|error|login|password|down|lambat|issue|bug|ticket|tiket)/i;
+    if (!technicalWords.test(trimmed)) return true;
+  }
+  return false;
+}
+
+function limitText(text, max = 2500) {
+  if (!text) return "";
+  return text.length > max ? text.slice(0, max) + "..." : text;
+}
+
+function cleanJSON(text) {
+  return text
+    .replace(/```json/g, "")
+    .replace(/```/g, "")
+    .trim();
+}
+
+function delay(ms) {
+  return new Promise(res => setTimeout(res, ms));
+}
+
+function detectByRules(text) {
+  const lowerText = text.toLowerCase();
+  let priority = "LOW";
+  let category = "Service Request Management";
+
+  const PRIORITY_RULES = [
+    { keyword: ["down", "server mati", "tidak bisa diakses", "mati total", "offline"], priority: "CRITICAL" },
+    { keyword: ["error", "failed", "gagal", "tidak bisa", "crash"], priority: "HIGH" },
+    { keyword: ["lambat", "slow", "lemot", "delay"], priority: "MEDIUM" },
+  ];
+
+  const CATEGORY_RULES = [
+    { keyword: ["password", "login", "akses", "tidak bisa masuk"], category: "Service Request Management" },
+    { keyword: ["error", "bug", "failure", "crash", "broke", "issue"], category: "Incident Management" },
+    { keyword: ["perubahan", "update", "upgrade", "deploy"], category: "Change Management" },
+    { keyword: ["berulang", "sering terjadi", "repeated"], category: "Problem Management" },
+  ];
+
+  for (const rule of PRIORITY_RULES) {
+    if (rule.keyword.some(k => lowerText.includes(k))) {
+      priority = rule.priority;
+      break;
+    }
+  }
+
+  for (const rule of CATEGORY_RULES) {
+    if (rule.keyword.some(k => lowerText.includes(k))) {
+      category = rule.category;
+      break;
+    }
+  }
+
+  return { priority, category };
+}
+
+// ================== EXPORTS ==================
+export { 
+  chatWithAI, 
+  analyzeEmail 
+};
