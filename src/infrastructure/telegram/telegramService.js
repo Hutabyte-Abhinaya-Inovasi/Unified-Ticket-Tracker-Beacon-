@@ -24,7 +24,6 @@ export function initTelegramBot() {
 
   const MAIN_CHAT_ID = env.TG_CHAT_ID.trim();
 
-  // Parsing ALLOWED_TELEGRAM_GROUPS
   let ALLOWED_TELEGRAM_GROUPS = [];
   if (env.ALLOWED_TELEGRAM_GROUPS && env.ALLOWED_TELEGRAM_GROUPS.trim() !== '') {
     ALLOWED_TELEGRAM_GROUPS = env.ALLOWED_TELEGRAM_GROUPS
@@ -44,11 +43,11 @@ export function initTelegramBot() {
   console.log(`   Main Chat ID     : ${MAIN_CHAT_ID}`);
   console.log(`   Monitored Groups : ${ALLOWED_TELEGRAM_GROUPS.length || 'Tidak ada'}`);
 
-  // ================== COMMAND HANDLER ==================
+  // Command Handler
   bot.onText(/\/menu|\/start/i, async (msg) => await sendMainMenu(msg));
   bot.onText(/\/getgroupid/i, async (msg) => await sendGroupInfo(msg));
 
-  // ================== MESSAGE HANDLER ==================
+  // Message Handler
   bot.on('message', async (msg) => {
     if (!msg.text || msg.from?.is_bot) return;
 
@@ -59,28 +58,15 @@ export function initTelegramBot() {
     const isMainGroup = chatId === MAIN_CHAT_ID;
     const isMonitoredGroup = ALLOWED_TELEGRAM_GROUPS.includes(chatId);
 
-    // ================== MAIN GROUP (AI ITSM Assistant) ==================
     if (isMainGroup) {
-      console.log(`🤖 AI Processing command from main group: ${msg.text}`);
+      if (msg.text.startsWith('/')) return;
 
-      // Jika command biasa (/menu, dll) → skip AI
-      if (msg.text.startsWith('/')) {
-        return;
-      }
-
-      // Kirim ke AI dengan tool calling capability
       const aiReply = await chatWithAI(msg.text);
-
-      await bot.sendMessage(chatId, aiReply, { 
-        parse_mode: "Markdown" 
-      });
+      await bot.sendMessage(chatId, aiReply, { parse_mode: "Markdown" });
       return;
     }
 
-    // ================== MONITORED GROUP (Incident dari WhatsApp) ==================
     if (isMonitoredGroup) {
-      console.log(`📨 Incident diterima dari grup: ${groupName}`);
-
       const pseudoEmail = {
         id: `tg-${Date.now()}`,
         from: `${sender} (${groupName})`,
@@ -92,11 +78,9 @@ export function initTelegramBot() {
       await sendIncidentAlert(pseudoEmail);
       return;
     }
-
-    console.log(`→ Pesan diabaikan (bukan main group atau monitored group)`);
   });
 
-  // ================== CALLBACK QUERY (Tombol Status) ==================
+  // Callback Query Handler
   bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     await bot.answerCallbackQuery(query.id);
@@ -107,10 +91,8 @@ export function initTelegramBot() {
       if (data.startsWith('status_')) {
         const newStatus = data.replace('status_', '');
         await handleStatusChange(query, chatId, newStatus);
-        return;
       }
 
-      // Menu Navigation
       if (data === 'main_menu') await sendMainMenu({ chat: { id: chatId } });
       if (data === 'tickets_all') await showTickets(chatId, null, "Semua Tiket");
       if (data === 'tickets_inprogress') await showTickets(chatId, "In Progress", "Tiket In Progress");
@@ -122,14 +104,13 @@ export function initTelegramBot() {
 
     } catch (err) {
       console.error("Callback error:", err.message);
-      await bot.sendMessage(chatId, "Terjadi kesalahan saat memproses permintaan.");
     }
   });
 
   return bot;
 }
 
-// ================== SEND INCIDENT ALERT (Formal) ==================
+// ================== SEND INCIDENT ALERT ==================
 export async function sendIncidentAlert(email, analysis = {}) {
   const botInstance = initTelegramBot();
   const CHAT_ID = env.TG_CHAT_ID.trim();
@@ -137,9 +118,7 @@ export async function sendIncidentAlert(email, analysis = {}) {
   const finalAnalysis = {
     category: analysis.category || "Incident Management",
     priority: analysis.priority || "MEDIUM",
-    summary: analysis.summary || (email.body.length > 180 
-      ? email.body.substring(0, 180) + "..." 
-      : email.body)
+    summary: analysis.summary || (email.body.length > 180 ? email.body.substring(0, 180) + "..." : email.body)
   };
 
   const initialText = `LAPORAN INCIDENT BARU
@@ -219,7 +198,7 @@ Status        : In Progress
   }
 }
 
-// ================== HANDLE STATUS CHANGE (Callback Button) ==================
+// ================== HANDLE STATUS CHANGE ==================
 async function handleStatusChange(query, chatId, newStatus) {
   const messageId = query.message.message_id;
   let messageText = query.message.text || "";
@@ -233,10 +212,7 @@ async function handleStatusChange(query, chatId, newStatus) {
     default:          statusDisplay = newStatus;
   }
 
-  messageText = messageText.replace(
-    /Status\s*:\s*In Progress/i,
-    `Status        : ${statusDisplay}`
-  );
+  messageText = messageText.replace(/Status\s*:\s*In Progress/i, `Status        : ${statusDisplay}`);
 
   await bot.editMessageText(messageText, {
     chat_id: chatId,
@@ -273,20 +249,9 @@ Silakan pilih menu:`;
     reply_markup: {
       inline_keyboard: [
         [{ text: "Semua Tiket", callback_data: "tickets_all" }],
-        [
-          { text: "In Progress", callback_data: "tickets_inprogress" },
-          { text: "Done", callback_data: "tickets_done" }
-        ],
-        [
-          { text: "Hari Ini", callback_data: "today" },
-          { text: "7 Hari Terakhir", callback_data: "last7" },
-          { text: "30 Hari", callback_data: "last30" }
-        ],
-        [
-          { text: "Daily Summary", callback_data: "summary" },
-          { text: "Cari Tiket", callback_data: "search" }
-        ],
-        [{ text: "Refresh Menu", callback_data: "main_menu" }]
+        [{ text: "In Progress", callback_data: "tickets_inprogress" }, { text: "Done", callback_data: "tickets_done" }],
+        [{ text: "Hari Ini", callback_data: "today" }, { text: "7 Hari", callback_data: "last7" }, { text: "30 Hari", callback_data: "last30" }],
+        [{ text: "Daily Summary", callback_data: "summary" }]
       ]
     }
   };
