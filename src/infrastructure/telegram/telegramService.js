@@ -111,7 +111,7 @@ export function initTelegramBot() {
 }
 
 // ================== SEND INCIDENT ALERT ==================
-export async function sendIncidentAlert(email, analysis = {}) {
+async function sendIncidentAlert(email, analysis = {}) {
   const botInstance = initTelegramBot();
   const CHAT_ID = env.TG_CHAT_ID.trim();
 
