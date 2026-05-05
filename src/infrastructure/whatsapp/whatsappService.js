@@ -1,5 +1,4 @@
 // src/infrastructure/whatsapp/whatsappService.js
-
 import P from "pino";
 import baileys from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
@@ -16,7 +15,6 @@ const {
 
 const AUTH_FOLDER = "./auth_info";
 
-// Cache untuk menyimpan metadata group (termasuk nama group)
 const groupCache = new Map();
 
 const ALLOWED_GROUPS = new Set([
@@ -60,10 +58,48 @@ function isLowPriority(priority = "") {
   return normalizePriority(priority) === "LOW";
 }
 
-// Helper untuk mendapatkan nama group dari cache
 function getGroupSubject(remoteJid) {
   const metadata = groupCache.get(remoteJid);
   return metadata?.subject?.trim() || "Unknown WhatsApp Group";
+}
+
+/**
+ * Membuat format pesan Ticket yang formal dan rapi
+ */
+function createFormalTicket(pseudoEmail, analysis) {
+  const now = new Date();
+  const tanggal = now.toLocaleDateString("id-ID", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric"
+  });
+  const waktu = now.toLocaleTimeString("id-ID", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZone: "Asia/Jakarta"
+  });
+
+  const priority = analysis?.priority?.toUpperCase() || "MEDIUM";
+  const status = priority === "HIGH" || priority === "CRITICAL" ? "URGENT" : "OPEN";
+
+  return `PESAN BARU DARI WHATSAPP
+
+Ticket ID     : ${pseudoEmail.id}
+Tanggal       : ${tanggal}
+Waktu         : ${waktu} WIB
+Priority      : ${priority}
+Status        : ${status}
+
+From          : ${pseudoEmail.from}
+Group         : ${pseudoEmail.group_name}
+
+Isi Pesan:
+${pseudoEmail.body}
+
+────────────────────────────────────
+Incident Bot • Unified Monitoring`;
 }
 
 export async function connectWhatsApp() {
@@ -92,7 +128,6 @@ export async function connectWhatsApp() {
       console.log("\n" + "=".repeat(60));
       console.log("📱 SCAN QR CODE DENGAN WHATSAPP");
       console.log("=".repeat(60));
-
       qrcode.generate(qr, { small: true });
     }
 
@@ -101,10 +136,9 @@ export async function connectWhatsApp() {
 
       try {
         const groups = await sock.groupFetchAllParticipating();
-
         console.log("\n📋 GROUP TERDETEKSI:");
         Object.entries(groups).forEach(([id, group]) => {
-          groupCache.set(id, group);   // Simpan ke cache
+          groupCache.set(id, group);
           console.log(`• ${group.subject || 'No Subject'} -> ${id}`);
         });
       } catch (err) {
@@ -114,7 +148,6 @@ export async function connectWhatsApp() {
 
     if (connection === "close") {
       const code = lastDisconnect?.error?.output?.statusCode;
-
       const shouldReconnect = code !== DisconnectReason.loggedOut;
 
       console.log(`❌ WA disconnected (${code || "unknown"})`);
@@ -129,7 +162,6 @@ export async function connectWhatsApp() {
     }
   });
 
-  // Listener untuk update nama group secara real-time
   sock.ev.on("groups.update", (updates) => {
     for (const update of updates) {
       if (update.id && update.subject !== undefined) {
@@ -146,33 +178,32 @@ export async function connectWhatsApp() {
       if (!messages?.length) return;
 
       const msg = messages[0];
-      if (!msg?.message) return;
-      if (msg.key.fromMe) return;
+      if (!msg?.message || msg.key.fromMe) return;
 
       const remoteJid = msg.key.remoteJid || "";
-
-      if (!isGroup(remoteJid)) return;
-      if (!ALLOWED_GROUPS.has(remoteJid)) return;
+      if (!isGroup(remoteJid) || !ALLOWED_GROUPS.has(remoteJid)) return;
 
       const senderName = msg.pushName || "Unknown User";
       const text = extractMessageText(msg);
 
       if (!text) return;
 
-      console.log("\n📩 WhatsApp Message");
+      console.log("\n📩 WhatsApp Message Received");
       console.log(`Group : ${getGroupSubject(remoteJid)}`);
       console.log(`From  : ${senderName}`);
-      console.log(`Text  : ${text}`);
+      console.log(`Text  : ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`);
 
-      // === BAGIAN YANG SUDAH DIPERBAIKI ===
+      const ticketId = `WA-${Date.now()}`;
+
       const pseudoEmail = {
-        id: `wa-${Date.now()}`,
+        id: ticketId,
         from: senderName,
-        subject: getGroupSubject(remoteJid),           // ← Nama group sebagai subject
+        subject: getGroupSubject(remoteJid),
         body: text,
         source: "whatsapp",
         group_id: remoteJid,
-        group_name: getGroupSubject(remoteJid)         // Tambahan untuk kemudahan
+        group_name: getGroupSubject(remoteJid),
+        timestamp: new Date().toISOString()
       };
 
       const analysis = await analyzeEmail(pseudoEmail);
@@ -182,7 +213,15 @@ export async function connectWhatsApp() {
         return;
       }
 
-      const tg = await sendIncidentAlert(pseudoEmail, analysis);
+      // Buat pesan formal
+      const formalMessage = createFormalTicket(pseudoEmail, analysis);
+
+      // Kirim ke Telegram dengan format baru
+      const tg = await sendIncidentAlert({
+        ...pseudoEmail,
+        formalMessage,           // Tambahkan ini
+        analysis
+      });
 
       await saveEmailLog(
         pseudoEmail,
@@ -192,7 +231,7 @@ export async function connectWhatsApp() {
         tg?.telegramChatId || null
       );
 
-      console.log("✅ Forwarded to Telegram + Saved to Supabase");
+      console.log(`✅ Ticket ${ticketId} forwarded to Telegram`);
 
     } catch (err) {
       console.error("❌ Error processing WhatsApp:", err.message);

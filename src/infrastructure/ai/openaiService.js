@@ -261,7 +261,6 @@ ${safeBody}
   };
 }
 
-// ==================== HELPER FUNCTIONS ====================
 function isSmallTalk(text) {
   const trimmed = text.trim();
   if (!trimmed) return true;
@@ -334,7 +333,6 @@ function detectByRules(text) {
   return { priority, category };
 }
 
-// ================== EXPORTS ==================
 export { 
   chatWithAI, 
   analyzeEmail 
