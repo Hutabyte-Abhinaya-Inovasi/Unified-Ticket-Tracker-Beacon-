@@ -135,9 +135,6 @@ function createFormalTicket(email, analysis = {}) {
 Ticket ID     : ${email.id}
 Tanggal       : ${tanggal}
 Waktu         : ${waktu} WIB
-Priority      : ${priority}
-Status        : ${status}
-
 From          : ${email.from}
 Group         : ${email.group_name || email.subject}
 
