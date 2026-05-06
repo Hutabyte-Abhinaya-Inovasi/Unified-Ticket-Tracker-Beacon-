@@ -111,32 +111,57 @@ function initTelegramBot() {
   return bot;
 }
 
+// ================== CREATE FORMAL TICKET ==================
+function createFormalTicket(email, analysis = {}) {
+  const now = new Date();
+  const tanggal = now.toLocaleDateString("id-ID", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric"
+  });
+  const waktu = now.toLocaleTimeString("id-ID", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZone: "Asia/Jakarta"
+  });
+
+  const priority = (analysis.priority || "MEDIUM").toUpperCase();
+  const status = ["HIGH", "CRITICAL"].includes(priority) ? "URGENT" : "In Progress";
+
+  return `PESAN BARU DARI WHATSAPP
+
+Ticket ID     : ${email.id}
+Tanggal       : ${tanggal}
+Waktu         : ${waktu} WIB
+Priority      : ${priority}
+Status        : ${status}
+
+From          : ${email.from}
+Group         : ${email.group_name || email.subject}
+
+Isi Pesan:
+${email.body}
+
+────────────────────────────────────`;
+}
+
 // ================== SEND INCIDENT ALERT ==================
 async function sendIncidentAlert(email, analysis = {}) {
   const botInstance = initTelegramBot();
   const CHAT_ID = env.TG_CHAT_ID.trim();
 
-  const finalAnalysis = {
-    category: analysis.category || "Incident Management",
-    priority: analysis.priority || "MEDIUM",
-    summary: analysis.summary || (email.body.length > 180 ? email.body.substring(0, 180) + "..." : email.body)
-  };
+  // Jika ada formalMessage dari WhatsApp, gunakan langsung
+  let messageText;
+  if (email.formalMessage) {
+    messageText = email.formalMessage;
+  } else {
+    // Format default untuk Telegram Group atau sumber lain
+    messageText = createFormalTicket(email, analysis);
+  }
 
-  const initialText = `LAPORAN INCIDENT BARU
-
-────────────────────────────────
-Ticket ID     : Menunggu...
-
-Pengirim      : ${email.from}
-Subject       : ${email.subject}
-
-Ringkasan:
-${finalAnalysis.summary}
-
-Kategori      : ${finalAnalysis.category}
-Prioritas     : ${finalAnalysis.priority}
-Status        : In Progress
-────────────────────────────────`;
+  const priority = (analysis.priority || "MEDIUM").toUpperCase();
 
   const keyboard = {
     reply_markup: {
@@ -153,49 +178,28 @@ Status        : In Progress
     }
   };
 
-  const sent = await botInstance.sendMessage(CHAT_ID, initialText, {
+  const sent = await botInstance.sendMessage(CHAT_ID, messageText, {
     parse_mode: "Markdown",
     ...keyboard,
-    disable_notification: finalAnalysis.priority !== "CRITICAL"
+    disable_notification: !["HIGH", "CRITICAL"].includes(priority)
   });
 
   const telegramMessageId = sent.message_id.toString();
 
   try {
-    const ticketId = await saveEmailLog(
+    // Simpan ke database
+    const savedTicketId = await saveEmailLog(
       email,
-      finalAnalysis,
+      analysis,
       true,
       telegramMessageId,
       sent.chat.id.toString()
     );
 
-    const finalText = `LAPORAN INCIDENT BARU
+    console.log(`✅ Ticket berhasil dibuat: ${savedTicketId}`);
 
-────────────────────────────────
-Ticket ID     : ${ticketId}
-
-Pengirim      : ${email.from}
-Subject       : ${email.subject}
-
-Ringkasan:
-${finalAnalysis.summary}
-
-Kategori      : ${finalAnalysis.category}
-Prioritas     : ${finalAnalysis.priority}
-Status        : In Progress
-────────────────────────────────`;
-
-    await botInstance.editMessageText(finalText, {
-      chat_id: CHAT_ID,
-      message_id: sent.message_id,
-      parse_mode: "Markdown",
-      reply_markup: keyboard.reply_markup
-    });
-
-    console.log(`✅ Ticket berhasil dibuat: ${ticketId}`);
   } catch (err) {
-    console.error("❌ Gagal menyimpan ticket:", err.message);
+    console.error("❌ Gagal menyimpan ticket ke database:", err.message);
   }
 }
 
@@ -206,14 +210,15 @@ async function handleStatusChange(query, chatId, newStatus) {
 
   let statusDisplay = "";
   switch (newStatus) {
-    case "Done":      statusDisplay = "Resolved (Done)"; break;
-    case "Escalated": statusDisplay = "Resolved (Escalated)"; break;
-    case "Cancelled": statusDisplay = "Cancelled"; break;
-    case "NoAction":  statusDisplay = "No Action Needed"; break;
+    case "Done":      statusDisplay = "✅ Resolved (Done)"; break;
+    case "Escalated": statusDisplay = "🔄 Resolved (Escalated)"; break;
+    case "Cancelled": statusDisplay = "❌ Cancelled"; break;
+    case "NoAction":  statusDisplay = "➖ No Action Needed"; break;
     default:          statusDisplay = newStatus;
   }
 
-  messageText = messageText.replace(/Status\s*:\s*In Progress/i, `Status        : ${statusDisplay}`);
+  // Ganti status di pesan
+  messageText = messageText.replace(/Status\s*:\s*.+/i, `Status        : ${statusDisplay}`);
 
   await bot.editMessageText(messageText, {
     chat_id: chatId,
@@ -225,7 +230,7 @@ async function handleStatusChange(query, chatId, newStatus) {
   await updateIncidentStatus(messageId.toString(), newStatus);
 
   await bot.answerCallbackQuery(query.id, {
-    text: `Status diubah menjadi: ${statusDisplay}`,
+    text: `✅ Status diubah menjadi: ${statusDisplay}`,
     show_alert: true
   });
 }
@@ -242,17 +247,24 @@ Tipe       : ${msg.chat.type}`;
 }
 
 async function sendMainMenu(msg) {
-  const text = `Unified Incident Management Bot
+  const text = `🛠️ *Unified Incident Management Bot*
 
 Silakan pilih menu:`;
 
   const keyboard = {
     reply_markup: {
       inline_keyboard: [
-        [{ text: "Semua Tiket", callback_data: "tickets_all" }],
-        [{ text: "In Progress", callback_data: "tickets_inprogress" }, { text: "Done", callback_data: "tickets_done" }],
-        [{ text: "Hari Ini", callback_data: "today" }, { text: "7 Hari", callback_data: "last7" }, { text: "30 Hari", callback_data: "last30" }],
-        [{ text: "Daily Summary", callback_data: "summary" }]
+        [{ text: "📋 Semua Tiket", callback_data: "tickets_all" }],
+        [
+          { text: "🔄 In Progress", callback_data: "tickets_inprogress" },
+          { text: "✅ Done", callback_data: "tickets_done" }
+        ],
+        [
+          { text: "📅 Hari Ini", callback_data: "today" },
+          { text: "7 Hari", callback_data: "last7" },
+          { text: "30 Hari", callback_data: "last30" }
+        ],
+        [{ text: "📊 Daily Summary", callback_data: "summary" }]
       ]
     }
   };
@@ -270,16 +282,16 @@ async function showTicketsByDays(chatId, days, title) {
 
 async function sendDailySummary(chatId) {
   const summary = await getDailySummary();
-  const text = `📊 Daily Summary
+  const text = `📊 *Daily Summary*
 
-Tanggal     : ${summary.date}
-Total Tiket : ${summary.total}
-Critical    : ${summary.critical}
-High        : ${summary.high}
-In Progress : ${summary.inProgress}
-Done        : ${summary.done}`;
+Tanggal       : ${summary.date || new Date().toLocaleDateString('id-ID')}
+Total Tiket   : ${summary.total || 0}
+Critical      : ${summary.critical || 0}
+High          : ${summary.high || 0}
+In Progress   : ${summary.inProgress || 0}
+Done          : ${summary.done || 0}`;
 
-  await bot.sendMessage(chatId, text);
+  await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
 }
 
 // ================== EXPORTS ==================
