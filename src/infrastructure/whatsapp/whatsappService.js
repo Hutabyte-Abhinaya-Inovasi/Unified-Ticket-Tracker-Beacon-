@@ -89,8 +89,6 @@ function createFormalTicket(pseudoEmail, analysis) {
 Ticket ID     : ${pseudoEmail.id}
 Tanggal       : ${tanggal}
 Waktu         : ${waktu} WIB
-Priority      : ${priority}
-Status        : ${status}
 
 From          : ${pseudoEmail.from}
 Group         : ${pseudoEmail.group_name}
@@ -98,8 +96,7 @@ Group         : ${pseudoEmail.group_name}
 Isi Pesan:
 ${pseudoEmail.body}
 
-────────────────────────────────────
-Incident Bot • Unified Monitoring`;
+────────────────────────────────────`;
 }
 
 export async function connectWhatsApp() {
