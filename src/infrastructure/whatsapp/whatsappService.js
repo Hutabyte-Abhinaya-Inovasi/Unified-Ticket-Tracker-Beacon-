@@ -4,7 +4,7 @@ import baileys from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
 import { analyzeEmail } from "../ai/openaiService.js";
 import { sendIncidentAlert } from "../telegram/telegramService.js";
-import { saveEmailLog, generateTicketId } from "../../database/supabase.js";   // ← Tambahkan generateTicketId
+import { saveEmailLog, generateTicketId } from "../../database/supabase.js";
 
 const {
   makeWASocket,
@@ -29,8 +29,43 @@ console.log(`📋 ALLOWED_GROUPS loaded: ${ALLOWED_GROUPS.size} group(s)`);
 
 let sock = null;
 
-// ... (extractMessageText, isGroup, normalizePriority, isLowPriority, getGroupSubject tetap sama)
+function extractMessageText(msg) {
+  const message = msg.message;
+  if (!message) return "";
 
+  return (
+    message.conversation ||
+    message.extendedTextMessage?.text ||
+    message.imageMessage?.caption ||
+    message.videoMessage?.caption ||
+    message.documentMessage?.caption ||
+    message.buttonsResponseMessage?.selectedDisplayText ||
+    message.listResponseMessage?.title ||
+    message.templateButtonReplyMessage?.selectedDisplayText ||
+    ""
+  ).trim();
+}
+
+function isGroup(remoteJid = "") {
+  return remoteJid.endsWith("@g.us");
+}
+
+function normalizePriority(priority = "") {
+  return String(priority).trim().toUpperCase();
+}
+
+function isLowPriority(priority = "") {
+  return normalizePriority(priority) === "LOW";
+}
+
+function getGroupSubject(remoteJid) {
+  const metadata = groupCache.get(remoteJid);
+  return metadata?.subject?.trim() || "Unknown WhatsApp Group";
+}
+
+/**
+ * Membuat format pesan Ticket yang formal dan rapi
+ */
 function createFormalTicket(pseudoEmail, analysis) {
   const now = new Date();
   const tanggal = now.toLocaleDateString("id-ID", {
@@ -47,7 +82,6 @@ function createFormalTicket(pseudoEmail, analysis) {
   });
 
   const priority = analysis?.priority?.toUpperCase() || "MEDIUM";
-  const status = priority === "HIGH" || priority === "CRITICAL" ? "URGENT" : "OPEN";
 
   return `PESAN BARU DARI WHATSAPP
 
@@ -61,7 +95,6 @@ Group         : ${pseudoEmail.group_name}
 Isi Pesan:
 ${pseudoEmail.body}
 
-status        : ${status}
 ────────────────────────────────────`;
 }
 
@@ -156,11 +189,11 @@ export async function connectWhatsApp() {
       console.log(`From  : ${senderName}`);
       console.log(`Text  : ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`);
 
-      // === PERUBAHAN UTAMA ===
-      const ticketId = await generateTicketId();   // Gunakan generator yang sama
+      // === GUNAKAN TICKET ID RESMI ===
+      const ticketId = await generateTicketId();
 
       const pseudoEmail = {
-        id: ticketId,                    // Sekarang pakai INC-...
+        id: ticketId,
         from: senderName,
         subject: getGroupSubject(remoteJid),
         body: text,
@@ -177,14 +210,17 @@ export async function connectWhatsApp() {
         return;
       }
 
+      // Buat pesan formal
       const formalMessage = createFormalTicket(pseudoEmail, analysis);
 
+      // Kirim ke Telegram
       const tg = await sendIncidentAlert({
         ...pseudoEmail,
         formalMessage,
         analysis
       });
 
+      // Simpan ke database
       await saveEmailLog(
         pseudoEmail,
         analysis,
