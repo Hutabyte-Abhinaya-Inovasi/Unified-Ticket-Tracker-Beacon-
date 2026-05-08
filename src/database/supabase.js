@@ -61,7 +61,8 @@ export async function generateTicketId() {
  */
 export async function saveEmailLog(email, analysis = {}, telegramSent = false, telegramMessageId = null, telegramChatId = null) {
   try {
-    const ticketId = await generateTicketId();
+    // Gunakan ticket_id yang sudah digenerate (jika ada)
+    const ticketId = email.id || await generateTicketId();
 
     const payload = {
       ticket_id: ticketId,
