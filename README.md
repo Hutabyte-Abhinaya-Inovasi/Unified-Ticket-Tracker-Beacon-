@@ -97,7 +97,7 @@ The name represents the system's purpose:
 
 ## Current Version vs Rebuild Target
 
-| Area | UTT v0 / Current Prototype | Project Beacon Rebuild |
+| Area | UTT v0 / Current Prototype | Project Beacon v1 |
 |---|---|---|
 | Main role | Passive alert and forwarding bot | Operational alarm and control system |
 | Main channels | WhatsApp group, Telegram, limited email module | WhatsApp group, WhatsApp DM, Email, Telegram, Microsoft Teams |
@@ -395,7 +395,6 @@ The current prototype uses:
 
 | Layer | Recommended Stack |
 |---|---|
-| Frontend Dashboard | React + Vite + TypeScript + Tailwind CSS |
 | Backend API | Node.js + Express or Fastify + TypeScript |
 | Worker Service | Node.js worker / queue worker |
 | Database | Supabase PostgreSQL |
