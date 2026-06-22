@@ -1,5 +1,5 @@
-[README_Project_Beacon_Rebuild.md](https://github.com/user-attachments/files/29216474/README_Project_Beacon_Rebuild.md)
-# Project Beacon - Unified Ticket Tracker Rebuild
+
+# Beacon - Unified Ticket Tracker V1
 
 ![Status](https://img.shields.io/badge/status-rebuild%20planned-orange)
 ![Phase](https://img.shields.io/badge/phase-P0%20Illuminate-blue)
@@ -295,49 +295,68 @@ Expected result:
 ---
 
 ## Target Solution Architecture
-
 ```mermaid
-flowchart TD
-    WA_G[WhatsApp Groups] --> INTAKE[Channel Intake Layer]
-    WA_DM[WhatsApp DM] --> INTAKE
-    EMAIL[Email Inbox] --> INTAKE
-    TG[Telegram] --> INTAKE
-    TEAMS[Microsoft Teams / Hutabot] --> INTAKE
+flowchart TB
+    WA["WhatsApp (Baileys)"]
+    TG["Telegram Bot API"]
+    EMAIL["Email IMAP/Webhook"]
 
-    INTAKE --> RAW[Raw Intake Logs]
-    RAW --> NORMALIZE[Message Normalization]
-    NORMALIZE --> AI[AI Triage Engine]
+    CLICKUP["ClickUp (System of Record)"]
+    OUTLINE["Outline (SOPs)"]
+    OPENAI["OpenAI (LLM)"]
 
-    AI --> REL{Action Required?}
-    REL -- No --> NOACTION[No Action Needed Log]
-    REL -- Yes --> THREAD{Existing Ticket?}
+    API["SERVICE: api (Railway)\n- inbound webhooks / channel receiver\n- signature verify + idempotency\n- raw payload archive\n- admin API + health\n- ops-console UI"]
 
-    THREAD -- Yes --> APPEND[Append to Ticket Thread]
-    THREAD -- No --> TICKET[Create Ticket]
+    WORKER["SERVICE: worker (Railway)\n- SLA timer scheduler\n- outbox drain to ClickUp / notify\n- classify / correlate / decide / score\n- Outline retrieval + draft generation\n- reconciliation + handover generation"]
 
-    APPEND --> SLA[SLA Engine]
-    TICKET --> SLA
+    DB["SUPABASE POSTGRES\nOne coordination database"]
 
-    SLA --> DASH[Beacon Dashboard]
-    SLA --> NOTIF[Telegram / Teams Notification]
-    SLA --> REMINDER[Reminder Engine]
+    APPEND["Append-only\n- events\n- raw_payloads\n- action_log"]
 
-    DASH --> HUMAN[Human Operator]
-    NOTIF --> HUMAN
-    REMINDER --> HUMAN
+    COORD["Coordination\n- sla_clocks\n- ticket_link\n- outbox\n- processed_events\n- approval_requests"]
 
-    HUMAN --> STATUS[Status / PIC / Escalation Update]
-    STATUS --> AUDIT[Ticket History & Audit Log]
-    STATUS --> REPORT[Handover & Reports]
+    PROJ["Mutable Projections\n- tickets\n- participants\n- handovers\n- knowledge_hit"]
 
-    AI --> SOP[SOP / KB Recommendation]
-    SOP --> HUMAN
+    CONSOLE["ops-console\nserved by api"]
+    OPERATORS["Operators\nshift lead / dispatcher / on-call engineer"]
+    HITL["Human-in-the-loop\napprovals / failed actions / review"]
 
-    STATUS --> CLICKUP[ClickUp / Microsoft Excel]
-    SOP --> OUTLINE[Outline Knowledge Base]
+    WA -->|"inbound"| API
+    TG -->|"webhooks"| API
+    EMAIL -->|"channel rx"| API
+
+    API -->|"append events"| APPEND
+    APPEND --> DB
+    COORD --> DB
+    PROJ --> DB
+
+    API <-->|"approvals / review"| WORKER
+    WORKER -->|"read / write"| COORD
+    WORKER -->|"update projections"| PROJ
+
+    CLICKUP -->|"webhooks"| WORKER
+    WORKER -->|"sync"| CLICKUP
+
+    OUTLINE -->|"retrieve SOP / KB"| WORKER
+    OPENAI -->|"infer / classify / score"| WORKER
+
+    OPERATORS --> CONSOLE
+    CONSOLE -->|"approve / inspect / undo split-merge"| API
+    CONSOLE --> HITL
+    HITL -->|"approval decision"| API
+
+    B1["Boundary: every external system is behind adapter"]
+    B2["Boundary: ClickUp is system of record"]
+    B3["Boundary: Supabase is authoritative for events / audit / coordination"]
+    B4["Boundary: Worker is only writer to external systems via outbox"]
+    B5["Boundary: outbound side-effects have choke point and kill-switch"]
+
+    DB --- B1
+    DB --- B2
+    DB --- B3
+    DB --- B4
+    DB --- B5
 ```
-
----
 
 ## Target Data Flow
 
