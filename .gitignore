@@ -14,3 +14,4 @@ build/
 
 # Misc
 .DS_Store
+auth_info/
