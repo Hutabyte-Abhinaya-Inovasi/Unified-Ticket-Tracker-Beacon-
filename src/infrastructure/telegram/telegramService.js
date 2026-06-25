@@ -2,11 +2,11 @@
 
 import TelegramBot from 'node-telegram-bot-api';
 import { env } from '../../config/env.js';
-import { 
+import {
   saveEmailLog,
-  updateIncidentStatus, 
-  getTicketsByStatus, 
-  getTicketsByDateRange, 
+  updateIncidentStatus,
+  getTicketsByStatus,
+  getTicketsByDateRange,
   getDailySummary,
   getTicketById
 } from '../../database/supabase.js';
@@ -56,27 +56,37 @@ function initTelegramBot() {
     const groupName = msg.chat.title || "Private Chat";
     const sender = msg.from?.first_name || msg.from?.username || "Unknown";
 
-    const isMainGroup = chatId === MAIN_CHAT_ID;
     const isMonitoredGroup = ALLOWED_TELEGRAM_GROUPS.includes(chatId);
+    const isMainGroup = chatId === MAIN_CHAT_ID;
 
-    if (isMainGroup) {
-      if (msg.text.startsWith('/')) return; // Jangan proses command di main group
-
-      const aiReply = await chatWithAI(msg.text);
-      await bot.sendMessage(chatId, aiReply, { parse_mode: "Markdown" });
-      return;
-    }
-
+    // Prioritas 1: Jika grup adalah monitored intake group → simpan ke Supabase
     if (isMonitoredGroup) {
+      if (msg.text.startsWith('/')) return; // skip commands
+
+      console.log(`\n📩 Telegram Message Received`);
+      console.log(`Group  : ${groupName} (${chatId})`);
+      console.log(`From   : ${sender}`);
+      console.log(`Text   : ${msg.text.substring(0, 100)}${msg.text.length > 100 ? '...' : ''}`);
+
       const pseudoEmail = {
         id: `TG-${Date.now()}`,
-        from: `${sender} (${groupName})`,
+        from: `${sender}`,
         subject: `Laporan dari ${groupName}`,
         body: msg.text,
-        source: "telegram_group"
+        source: "telegram_group",
+        group_name: groupName
       };
 
       await sendIncidentAlert(pseudoEmail);
+      return;
+    }
+
+    // Prioritas 2: Jika main group (dan bukan monitored) → balas dengan AI
+    if (isMainGroup) {
+      if (msg.text.startsWith('/')) return; // skip commands
+
+      const aiReply = await chatWithAI(msg.text);
+      await bot.sendMessage(chatId, aiReply, { parse_mode: "Markdown" });
       return;
     }
   });
@@ -124,9 +134,9 @@ function formatTicketList(tickets, title) {
     const date = new Date(ticket.processed_at).toLocaleDateString('id-ID', {
       day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
     });
-    
+
     const priorityEmoji = ticket.priority === 'CRITICAL' ? '🔴' :
-                          ticket.priority === 'HIGH' ? '🟠' : '🟡';
+      ticket.priority === 'HIGH' ? '🟠' : '🟡';
 
     text += `${index + 1}. ${priorityEmoji} *${ticket.ticket_id}*\n`;
     text += `   👤 ${ticket.from}\n`;
@@ -170,6 +180,15 @@ async function sendDailySummary(chatId) {
   await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
 }
 
+// ================== ESCAPE HTML ==================
+// Escapes HTML special characters so user content renders safely in HTML parse mode
+function escapeHTML(text = '') {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 // ================== CREATE FORMAL TICKET ==================
 function createFormalTicket(email, analysis = {}) {
   const now = new Date();
@@ -186,17 +205,17 @@ function createFormalTicket(email, analysis = {}) {
     timeZone: "Asia/Jakarta"
   });
 
-  return `📨 *PESAN BARU DITERIMA*
+  return `📨 <b>PESAN BARU DITERIMA</b>
 
-Ticket ID     : ${email.id}
-Tanggal       : ${tanggal}
-Waktu         : ${waktu} WIB
+Ticket ID     : ${escapeHTML(email.id)}
+Tanggal       : ${escapeHTML(tanggal)}
+Waktu         : ${escapeHTML(waktu)} WIB
 
-From          : ${email.from}
-Group         : ${email.group_name || email.subject || '-'}
+From          : ${escapeHTML(email.from)}
+Group         : ${escapeHTML(email.group_name || email.subject || '-')}
 
 Isi Pesan:
-${email.body}
+${escapeHTML(email.body)}
 
 ────────────────────────────────────`;
 }
@@ -210,35 +229,45 @@ async function sendIncidentAlert(email, analysis = {}) {
 
   const priority = (analysis.priority || "MEDIUM").toUpperCase();
 
-  const keyboard = {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "✅ Resolved", callback_data: "status_Done" },
-          { text: "🔄 Escalated", callback_data: "status_Escalated" }
-        ],
-        [
-          { text: "❌ Cancel", callback_data: "status_Cancelled" },
-          { text: "➖ No Action", callback_data: "status_NoAction" }
+  let telegramMessageId = null;
+  let telegramChatId = null;
+
+  try {
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "✅ Resolved", callback_data: "status_Done" },
+            { text: "🔄 Escalated", callback_data: "status_Escalated" }
+          ],
+          [
+            { text: "❌ Cancel", callback_data: "status_Cancelled" },
+            { text: "➖ No Action", callback_data: "status_NoAction" }
+          ]
         ]
-      ]
-    }
-  };
+      }
+    };
 
-  const sent = await botInstance.sendMessage(CHAT_ID, messageText, {
-    parse_mode: "Markdown",
-    ...keyboard,
-    disable_notification: !["HIGH", "CRITICAL"].includes(priority)
-  });
+    const sent = await botInstance.sendMessage(CHAT_ID, messageText, {
+      parse_mode: "HTML",
+      ...keyboard,
+      disable_notification: !["HIGH", "CRITICAL"].includes(priority)
+    });
 
-  const telegramMessageId = sent.message_id.toString();
+    telegramMessageId = sent.message_id.toString();
+    telegramChatId = sent.chat.id.toString();
+    console.log(`✅ Alert terkirim ke Telegram (message_id: ${telegramMessageId})`);
+  } catch (err) {
+    console.error("⚠️ Gagal mengirim notifikasi alert ke Telegram:", err.message);
+  }
 
+  // Tetap simpan ke Supabase meskipun Telegram gagal
   await saveEmailLog(
     email,
     analysis,
-    true,
+    telegramMessageId ? true : false,
     telegramMessageId,
-    sent.chat.id.toString()
+    telegramChatId
   );
 }
 
@@ -309,7 +338,7 @@ async function sendMainMenu(msg) {
 }
 
 // ================== EXPORTS ==================
-export { 
-  initTelegramBot, 
-  sendIncidentAlert 
+export {
+  initTelegramBot,
+  sendIncidentAlert
 };

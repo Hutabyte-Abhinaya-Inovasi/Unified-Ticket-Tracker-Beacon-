@@ -1,17 +1,15 @@
 // src/infrastructure/whatsapp/whatsappService.js
 import P from "pino";
-import baileys from "@whiskeysockets/baileys";
-import qrcode from "qrcode-terminal";
-import { analyzeEmail } from "../ai/openaiService.js";
-import { sendIncidentAlert } from "../telegram/telegramService.js";
-import { saveEmailLog, generateTicketId } from "../../database/supabase.js";
-
-const {
+import {
   makeWASocket,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason
-} = baileys;
+} from "@whiskeysockets/baileys";
+import qrcode from "qrcode-terminal";
+import { analyzeEmail } from "../ai/openaiService.js";
+import { sendIncidentAlert } from "../telegram/telegramService.js";
+import { saveEmailLog, generateTicketId } from "../../database/supabase.js";
 
 const AUTH_FOLDER = "./auth_info";
 

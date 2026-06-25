@@ -1,7 +1,11 @@
 // src/database/supabase.js
 
 import { createClient } from '@supabase/supabase-js';
+import WebSocket from 'ws';
 import { env } from '../config/env.js';
+
+// Polyfill WebSocket untuk Node.js < 22 agar Supabase Realtime berfungsi
+globalThis.WebSocket = WebSocket;
 
 // Inisialisasi Supabase Client (gunakan service_role key untuk backend)
 export const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_KEY, {
