@@ -7,9 +7,14 @@ import {
   deleteTicket 
 } from "../../database/supabase.js";
 
+const isGemini = !!env.GEMINI_API_KEY;
+
 const client = new OpenAI({
-  apiKey: env.OPENAI_API_KEY,
+  apiKey: env.GEMINI_API_KEY || env.OPENAI_API_KEY,
+  baseURL: isGemini ? "https://generativelanguage.googleapis.com/v1beta/openai/" : undefined,
 });
+
+const AI_MODEL = isGemini ? "gemini-2.5-flash" : "gpt-4o-mini";
 
 const MAX_RETRY = 3;
 
@@ -106,7 +111,7 @@ Jika user meminta update/hapus/tampilkan ticket, gunakan tool yang sesuai.`
   while (attempt < MAX_RETRY) {
     try {
       const response = await client.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: AI_MODEL,
         messages: messages,
         tools: tools,
         tool_choice: "auto",
@@ -205,7 +210,7 @@ ${safeBody}
   while (attempt < MAX_RETRY) {
     try {
       const response = await client.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: AI_MODEL,
         messages: [
           { 
             role: "system", 
@@ -333,7 +338,102 @@ function detectByRules(text) {
   return { priority, category };
 }
 
+async function checkMessageRelevance(newMessage, activeTicketBody, activeTicketSummary) {
+  try {
+    const prompt = `Anda adalah asisten triase operasional IT.
+Tugas Anda adalah menentukan apakah pesan baru dari chat grup membahas insiden/permohonan yang sama dengan tiket aktif yang sedang berjalan, atau merupakan laporan masalah baru yang sama sekali tidak berhubungan.
+
+Tiket Aktif Saat Ini:
+Ringkasan: ${activeTicketSummary || 'Tidak ada'}
+Pesan Awal/Detail: ${activeTicketBody || 'Tidak ada'}
+
+Pesan Baru yang Masuk:
+"${newMessage}"
+
+Silakan analisis apakah Pesan Baru ini membahas insiden yang sama atau merupakan balasan (follow-up/pertanyaan/konfirmasi) dari Tiket Aktif.
+Jika pesan baru membahas topik baru yang berbeda (misal: tiket aktif membahas login error, tapi pesan baru membahas AC bocor atau printer rusak), maka isRelated harus false.
+Jika pesan baru adalah balasan singkat ("oke pak", "tolong diproses", "siap", dll) atau masih menanyakan/melaporkan kelanjutan dari tiket aktif, maka isRelated harus true.
+
+Keluarkan hasil analisis dalam format JSON valid berikut:
+{
+  "isRelated": true atau false,
+  "reason": "Alasan singkat analisis Anda dalam bahasa Indonesia"
+}`;
+
+    const response = await client.chat.completions.create({
+      model: AI_MODEL,
+      messages: [
+        { role: "system", content: "Anda hanya menjawab dengan format JSON valid." },
+        { role: "user", content: prompt }
+      ],
+      response_format: { type: "json_object" }
+    });
+
+    const resultText = response.choices[0].message.content;
+    const cleanResult = cleanJSON(resultText);
+    const result = JSON.parse(cleanResult);
+
+    console.log(`🧠 AI Relevance Check: isRelated = ${result.isRelated} (${result.reason})`);
+    return !!result.isRelated;
+  } catch (err) {
+    console.error("❌ Gagal mengecek relevansi pesan dengan AI:", err.message);
+    // Fallback aman: jika gagal, anggap terkait agar tidak membuat tiket duplikat secara tidak sengaja
+    return true;
+  }
+}
+
+async function routeMessageToActiveTickets(newMessage, activeTickets) {
+  try {
+    const ticketListStr = activeTickets.map((t, idx) => {
+      return `Ticket [${idx + 1}]:
+ID: ${t.ticket_id}
+Summary: ${t.summary || 'Tidak ada'}
+Detail/Body: ${t.body || 'Tidak ada'}
+--------------------`;
+    }).join('\n');
+
+    const prompt = `Anda adalah asisten triase operasional IT.
+Pesan baru masuk dari chat grup:
+"${newMessage}"
+
+Berikut adalah daftar tiket aktif yang saat ini terbuka di grup chat ini:
+${ticketListStr}
+
+Tugas Anda:
+1. Analisis apakah pesan baru tersebut merupakan kelanjutan, pertanyaan, konfirmasi, atau balasan yang relevan dengan salah satu tiket aktif di atas.
+2. Jika pesan baru membahas topik yang sama dengan salah satu tiket aktif, tentukan "relatedTicketId" berisi ID tiket tersebut (misal: "TG-1782713833972").
+3. Jika pesan baru membahas topik baru yang tidak ada hubungannya dengan tiket-tiket aktif di atas, maka "relatedTicketId" harus null.
+
+Keluarkan hasil analisis dalam format JSON valid berikut:
+{
+  "relatedTicketId": "ID-TIKET-YANG-COCOK" atau null,
+  "reason": "Alasan singkat analisis Anda dalam bahasa Indonesia"
+}`;
+
+    const response = await client.chat.completions.create({
+      model: AI_MODEL,
+      messages: [
+        { role: "system", content: "Anda hanya menjawab dengan format JSON valid." },
+        { role: "user", content: prompt }
+      ],
+      response_format: { type: "json_object" }
+    });
+
+    const resultText = response.choices[0].message.content;
+    const cleanResult = cleanJSON(resultText);
+    const result = JSON.parse(cleanResult);
+
+    console.log(`🧠 AI Multi-Topic Router: matched = ${result.relatedTicketId} (${result.reason})`);
+    return result.relatedTicketId || null;
+  } catch (err) {
+    console.error("❌ Gagal merutekan pesan dengan AI:", err.message);
+    return null;
+  }
+}
+
 export { 
   chatWithAI, 
-  analyzeEmail 
+  analyzeEmail,
+  checkMessageRelevance,
+  routeMessageToActiveTickets
 };

@@ -110,8 +110,7 @@ function fetchUnread() {
             return;
           }
 
-          const result = await sendIncidentAlert(emailData, analysis);
-          await saveEmailLog(emailData, analysis, true, result.telegramMessageId, result.telegramChatId);
+          await sendIncidentAlert(emailData, analysis);
 
         } catch (err) {
           console.error("❌ Error processing email:", err.message);

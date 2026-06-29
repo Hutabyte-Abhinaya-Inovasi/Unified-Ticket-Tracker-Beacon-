@@ -66,11 +66,11 @@ export async function generateTicketId() {
 export async function saveEmailLog(email, analysis = {}, telegramSent = false, telegramMessageId = null, telegramChatId = null) {
   try {
     // Gunakan ticket_id yang sudah digenerate (jika ada)
-    const ticketId = email.id || await generateTicketId();
+    const ticketId = email.ticket_id || email.id || await generateTicketId();
 
     const payload = {
       ticket_id: ticketId,
-      email_id: email.id || email.messageId || Date.now().toString(),
+      email_id: email.messageId || email.id || Date.now().toString(),
       from: email.from || null,
       subject: email.subject || null,
       body: email.body || null,
@@ -103,7 +103,6 @@ export async function saveEmailLog(email, analysis = {}, telegramSent = false, t
     return null;
   }
 }
-
 // ====================== UPDATE STATUS ======================
 /**
  * Update status tiket berdasarkan telegram_message_id
@@ -119,7 +118,7 @@ export async function updateIncidentStatus(telegramMessageId, newStatus) {
     updated_at: new Date().toISOString(),
   };
 
-  if (["Done", "Resolved"].includes(newStatus)) {
+  if (["Done", "Resolved", "Cancelled"].includes(newStatus)) {
     updateData.resolved_at = new Date().toISOString();
   }
 
@@ -134,12 +133,28 @@ export async function updateIncidentStatus(telegramMessageId, newStatus) {
   }
 
   console.log(`✅ Status tiket diubah menjadi "${newStatus}" (telegram_message_id: ${telegramMessageId})`);
+
+  // Jika tiket selesai/dibatalkan, tutup sesi percakapannya di tabel conversation
+  if (["Done", "Resolved", "Cancelled"].includes(newStatus)) {
+    try {
+      const { data, error: fetchError } = await supabase
+        .from('Unified_Ticket_Tracker')
+        .select('ticket_id')
+        .eq('telegram_message_id', telegramMessageId)
+        .limit(1);
+
+      if (data && data.length > 0) {
+        const ticketId = data[0].ticket_id;
+        await closeConversationSessionByTicket(ticketId);
+      }
+    } catch (err) {
+      console.error("⚠️ Gagal menutup sesi conversation saat update status:", err.message);
+    }
+  }
+
   return true;
 }
 
-/**
- * Ambil detail satu tiket berdasarkan ticket_id
- */
 export async function getTicketById(ticketId) {
   if (!ticketId) {
     console.warn("⚠️ ticketId kosong");
@@ -293,4 +308,221 @@ export async function getDailySummary() {
     inProgress: tickets.filter(t => t.status === "In Progress").length,
     done: tickets.filter(t => ["Done", "Resolved"].includes(t.status)).length,
   };
+}
+
+// ====================== CONVERSATION THREADING & SESSIONS ======================
+/**
+ * Mengambil semua tiket aktif (belum selesai) di grup tertentu
+ */
+export async function findActiveTicketsForGroup(groupId, source) {
+  try {
+    const { data, error } = await supabase
+      .from('Unified_Ticket_Tracker')
+      .select('*')
+      .eq(source === 'whatsapp' ? 'group_id' : 'telegram_chat_id', groupId)
+      .eq('source', source)
+      .not('status', 'in', '("Done","Resolved","Cancelled","No Action")')
+      .order('updated_at', { ascending: false })
+      .limit(5);
+
+    if (error) {
+      console.error(`❌ Error mencari tiket aktif grup (${groupId}):`, error.message);
+      return [];
+    }
+
+    return data || [];
+  } catch (err) {
+    console.error("❌ Unexpected error in findActiveTicketsForGroup:", err);
+    return [];
+  }
+}
+
+/**
+ * Mencari tiket aktif di grup WhatsApp/Telegram berdasarkan quoted message ID
+ * atau berdasarkan status sesi aktif ('OPEN') di tabel 'conversation'
+ */
+export async function findActiveTicketForThreading(remoteJid, groupSubject, quotedStanzaId = null, source = 'whatsapp') {
+  try {
+    // 1. Cek berdasarkan quoted message ID jika ada
+    if (quotedStanzaId) {
+      console.log("Mencari tiket induk dengan email_id = " + quotedStanzaId);
+      const { data, error } = await supabase
+        .from('Unified_Ticket_Tracker')
+        .select('*')
+        .eq('email_id', quotedStanzaId)
+        .limit(1);
+
+      if (error) {
+        console.error("Error mencari parent ticket via quote:", error.message);
+      }
+
+      if (data && data.length > 0) {
+        console.log("Ditemukan tiket induk berdasarkan quote: " + data[0].ticket_id);
+        return data[0];
+      }
+    }
+
+    // 2. Cek berdasarkan sesi aktif di tabel 'conversation'
+    const conversationKey = `${source}_${remoteJid}`;
+    console.log("Mencari sesi aktif di tabel conversation dengan key: " + conversationKey);
+
+    const { data: convData, error: convError } = await supabase
+      .from('conversation')
+      .select('ticket_id')
+      .eq('conversation_key', conversationKey)
+      .eq('status', 'OPEN')
+      .limit(1);
+
+    if (convError) {
+      console.error("Error mencari sesi aktif di tabel conversation:", convError.message);
+      return null;
+    }
+
+    if (convData && convData.length > 0 && convData[0].ticket_id) {
+      const activeTicketId = convData[0].ticket_id;
+      console.log("Sesi aktif ditemukan dengan Ticket ID: " + activeTicketId);
+
+      const { data: ticketData, error: ticketError } = await supabase
+        .from('Unified_Ticket_Tracker')
+        .select('*')
+        .eq('ticket_id', activeTicketId)
+        .limit(1);
+
+      if (ticketError) {
+        console.error("Error mengambil tiket dari database:", ticketError.message);
+        return null;
+      }
+
+      if (ticketData && ticketData.length > 0) {
+        return ticketData[0];
+      }
+    }
+
+    console.log("Tidak ada sesi aktif ditemukan.");
+    return null;
+  } catch (err) {
+    console.error("Unexpected error in findActiveTicketForThreading:", err);
+    return null;
+  }
+}
+
+/**
+ * Menambahkan balasan percakapan (follow-up) ke badan (body) tiket yang sudah ada
+ */
+export async function appendMessageToTicket(ticketId, currentBody, senderName, text) {
+  try {
+    const timestamp = new Date().toLocaleTimeString("id-ID", {
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone: "Asia/Jakarta"
+    });
+
+    const formattedAppend = `\n\n💬 [${timestamp} - ${senderName}]: ${text}`;
+    const newBody = (currentBody || "") + formattedAppend;
+
+    const { error } = await supabase
+      .from('Unified_Ticket_Tracker')
+      .update({
+        body: newBody,
+        updated_at: new Date().toISOString()
+      })
+      .eq('ticket_id', ticketId);
+
+    if (error) {
+      console.error("Gagal menambahkan pesan ke ticket " + ticketId + ":", error.message);
+      return false;
+    }
+
+    console.log("Berhasil menambahkan balasan ke ticket " + ticketId);
+    return true;
+  } catch (err) {
+    console.error("Unexpected error in appendMessageToTicket:", err);
+    return false;
+  }
+}
+
+/**
+ * Membuat atau mengaktifkan sesi percakapan baru berstatus 'OPEN'
+ */
+export async function createConversationSession(source, groupId, ticketId, lastMessage, summary = null) {
+  const conversationKey = `${source}_${groupId}`;
+  try {
+    const payload = {
+      conversation_key: conversationKey,
+      ticket_id: ticketId,
+      source_channel: source,
+      group_id: groupId,
+      status: 'OPEN',
+      last_message: lastMessage,
+      last_message_at: new Date().toISOString(),
+      summary: summary
+    };
+
+    const { error } = await supabase
+      .from('conversation')
+      .upsert(payload, { onConflict: 'conversation_key' });
+
+    if (error) {
+      console.error("Gagal membuat/mengupdate sesi conversation:", error.message);
+      return false;
+    }
+
+    console.log("Sesi conversation berhasil dibuat: " + conversationKey);
+    return true;
+  } catch (err) {
+    console.error("Unexpected error in createConversationSession:", err);
+    return false;
+  }
+}
+
+/**
+ * Memperbarui data pesan terakhir pada sesi percakapan yang aktif
+ */
+export async function updateConversationLastMessage(source, groupId, lastMessage) {
+  const conversationKey = `${source}_${groupId}`;
+  try {
+    const { error } = await supabase
+      .from('conversation')
+      .update({
+        last_message: lastMessage,
+        last_message_at: new Date().toISOString()
+      })
+      .eq('conversation_key', conversationKey)
+      .eq('status', 'OPEN');
+
+    if (error) {
+      console.error("Gagal memperbarui last_message pada sesi:", error.message);
+      return false;
+    }
+
+    console.log("Sesi " + conversationKey + " diperbarui.");
+    return true;
+  } catch (err) {
+    console.error("Unexpected error in updateConversationLastMessage:", err);
+    return false;
+  }
+}
+
+/**
+ * Menutup sesi percakapan (mengubah status menjadi 'CLOSED') berdasarkan ticket_id
+ */
+export async function closeConversationSessionByTicket(ticketId) {
+  try {
+    const { error } = await supabase
+      .from('conversation')
+      .update({ status: 'CLOSED' })
+      .eq('ticket_id', ticketId)
+      .eq('status', 'OPEN');
+
+    if (error) {
+      console.error("Gagal menutup sesi conversation untuk ticket " + ticketId + ":", error.message);
+      return false;
+    }
+
+    console.log("Sesi conversation untuk ticket " + ticketId + " ditutup (CLOSED).");
+    return true;
+  } catch (err) {
+    console.error("Unexpected error in closeConversationSessionByTicket:", err);
+    return false;
+  }
 }

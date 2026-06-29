@@ -7,9 +7,9 @@ import {
   DisconnectReason
 } from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
-import { analyzeEmail } from "../ai/openaiService.js";
-import { sendIncidentAlert } from "../telegram/telegramService.js";
-import { saveEmailLog, generateTicketId } from "../../database/supabase.js";
+import { analyzeEmail, checkMessageRelevance, routeMessageToActiveTickets } from "../ai/openaiService.js";
+import { sendIncidentAlert, initTelegramBot } from "../telegram/telegramService.js";
+import { saveEmailLog, generateTicketId, findActiveTicketForThreading, findActiveTicketsForGroup, appendMessageToTicket, createConversationSession, updateConversationLastMessage } from "../../database/supabase.js";
 
 const AUTH_FOLDER = "./auth_info";
 
@@ -187,17 +187,89 @@ export async function connectWhatsApp() {
       console.log(`From  : ${senderName}`);
       console.log(`Text  : ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`);
 
-      // === GUNAKAN TICKET ID RESMI ===
+      const quotedStanzaId = msg.message.extendedTextMessage?.contextInfo?.stanzaId || null;
+      const groupSubject = getGroupSubject(remoteJid);
+
+      let parentTicket = null;
+
+      // 1. Jika me-reply pesan lama secara langsung (quote)
+      if (quotedStanzaId) {
+        parentTicket = await findActiveTicketForThreading(remoteJid, groupSubject, quotedStanzaId, 'whatsapp');
+      } else {
+        // 2. Jika pesan biasa, ambil semua tiket yang sedang aktif di grup ini
+        const activeTickets = await findActiveTicketsForGroup(remoteJid, 'whatsapp');
+        
+        if (activeTickets.length === 1) {
+          // Jika hanya ada 1 tiket aktif, lakukan pencocokan relevansi standar
+          const isShort = text.length < 20;
+          const replyKeywords = ["baik", "oke", "ok", "siap", "tenggat", "kapan", "aman", "done", "proses", "sudah", "terima kasih", "thanks", "tolong", "perbaiki", "yah", "ini"];
+          const hasReplyKeyword = replyKeywords.some(k => text.toLowerCase().trim() === k);
+
+          if (isShort && hasReplyKeyword) {
+            parentTicket = activeTickets[0];
+          } else {
+            const isRelated = await checkMessageRelevance(text, activeTickets[0].body, activeTickets[0].summary);
+            if (isRelated) {
+              parentTicket = activeTickets[0];
+            }
+          }
+        } else if (activeTickets.length > 1) {
+          // Jika ada beberapa tiket aktif sekaligus, gunakan AI routing
+          const isShort = text.length < 20;
+          const replyKeywords = ["baik", "oke", "ok", "siap", "tenggat", "kapan", "aman", "done", "proses", "sudah", "terima kasih", "thanks", "tolong", "perbaiki", "yah", "ini"];
+          const hasReplyKeyword = replyKeywords.some(k => text.toLowerCase().trim() === k);
+
+          if (isShort && hasReplyKeyword) {
+            // Sebagai heuristik, hubungkan ke tiket aktif paling terakhir diperbarui
+            parentTicket = activeTickets[0];
+          } else {
+            const matchedTicketId = await routeMessageToActiveTickets(text, activeTickets);
+            if (matchedTicketId) {
+              parentTicket = activeTickets.find(t => t.ticket_id === matchedTicketId) || null;
+            }
+          }
+        }
+      }
+
+      if (parentTicket) {
+        console.log(`💬 Threading: Menambahkan balasan dari ${senderName} ke tiket aktif ${parentTicket.ticket_id}`);
+        
+        // 1. Simpan/append ke body di database
+        await appendMessageToTicket(parentTicket.ticket_id, parentTicket.body, senderName, text);
+
+        // Update data sesi conversation agar menunjuk ke tiket ini
+        await createConversationSession('whatsapp', remoteJid, parentTicket.ticket_id, text, parentTicket.summary);
+
+        // 2. Teruskan balasan ke Telegram (reply ke alert sebelumnya)
+        if (parentTicket.telegram_chat_id && parentTicket.telegram_message_id) {
+          try {
+            const botInstance = initTelegramBot();
+            const replyText = `💬 <b>Balasan dari ${senderName} (Ticket ${parentTicket.ticket_id})</b>:\n\n${text}`;
+            await botInstance.sendMessage(parentTicket.telegram_chat_id, replyText, {
+              parse_mode: "HTML",
+              reply_to_message_id: parseInt(parentTicket.telegram_message_id, 10)
+            });
+            console.log(`✅ Balasan berhasil diteruskan ke Telegram (reply_to_message_id: ${parentTicket.telegram_message_id})`);
+          } catch (tgErr) {
+            console.error("⚠️ Gagal meneruskan balasan ke Telegram:", tgErr.message);
+          }
+        }
+        return; // Hentikan alur, jangan buat tiket baru!
+      }
+
+      // === BUKAN FOLLOW-UP: BUAT TIKET BARU ===
       const ticketId = await generateTicketId();
 
       const pseudoEmail = {
-        id: ticketId,
+        id: ticketId,             // Digunakan sebagai fallback/ticket_id
+        ticket_id: ticketId,      // Ticket ID resmi
+        messageId: msg.key.id,    // WhatsApp message ID yang sebenarnya
         from: senderName,
-        subject: getGroupSubject(remoteJid),
+        subject: groupSubject,
         body: text,
         source: "whatsapp",
         group_id: remoteJid,
-        group_name: getGroupSubject(remoteJid),
+        group_name: groupSubject,
         timestamp: new Date().toISOString()
       };
 
@@ -211,23 +283,17 @@ export async function connectWhatsApp() {
       // Buat pesan formal
       const formalMessage = createFormalTicket(pseudoEmail, analysis);
 
-      // Kirim ke Telegram
+      // Kirim ke Telegram (ini sudah otomatis menyimpan ke database di dalamnya)
       const tg = await sendIncidentAlert({
         ...pseudoEmail,
         formalMessage,
         analysis
       });
 
-      // Simpan ke database
-      await saveEmailLog(
-        pseudoEmail,
-        analysis,
-        true,
-        tg?.telegramMessageId || null,
-        tg?.telegramChatId || null
-      );
+      console.log(`✅ Ticket ${ticketId} successfully created and forwarded to Telegram (Msg ID: ${tg?.telegramMessageId || 'N/A'})`);
 
-      console.log(`✅ Ticket ${ticketId} forwarded to Telegram`);
+      // Buat sesi conversation baru di database
+      await createConversationSession('whatsapp', remoteJid, ticketId, text, analysis?.summary || null);
 
     } catch (err) {
       console.error("❌ Error processing WhatsApp:", err.message);

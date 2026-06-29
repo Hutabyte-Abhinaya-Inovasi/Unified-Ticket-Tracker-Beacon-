@@ -8,9 +8,14 @@ import {
   getTicketsByStatus,
   getTicketsByDateRange,
   getDailySummary,
-  getTicketById
+  getTicketById,
+  findActiveTicketForThreading,
+  findActiveTicketsForGroup,
+  appendMessageToTicket,
+  createConversationSession,
+  updateConversationLastMessage
 } from '../../database/supabase.js';
-import { chatWithAI } from '../ai/openaiService.js';
+import { chatWithAI, checkMessageRelevance, routeMessageToActiveTickets } from '../ai/openaiService.js';
 
 let bot = null;
 
@@ -37,6 +42,15 @@ function initTelegramBot() {
     polling: {
       interval: 300,
       params: { allowed_updates: ["message", "callback_query"] }
+    }
+  });
+
+  // Tangkap error polling (glitch koneksi) agar tidak mencetak error fatal di konsol secara kasar
+  bot.on('polling_error', (error) => {
+    if (error.code === 'ECONNRESET' || error.message?.includes('ECONNRESET')) {
+      console.warn("⚠️ [Telegram Bot] Koneksi internet sempat terputus (ECONNRESET). Bot mencoba terhubung kembali...");
+    } else {
+      console.warn("⚠️ [Telegram Bot Polling Alert]:", error.message);
     }
   });
 
@@ -68,16 +82,90 @@ function initTelegramBot() {
       console.log(`From   : ${sender}`);
       console.log(`Text   : ${msg.text.substring(0, 100)}${msg.text.length > 100 ? '...' : ''}`);
 
+      const quotedMessageId = msg.reply_to_message ? msg.reply_to_message.message_id.toString() : null;
+      const groupSubject = `Laporan dari ${groupName}`;
+
+      let parentTicket = null;
+
+      // 1. Jika me-reply pesan lama secara langsung (quote)
+      if (quotedMessageId) {
+        parentTicket = await findActiveTicketForThreading(chatId, groupSubject, quotedMessageId, 'telegram_group');
+      } else {
+        // 2. Jika pesan biasa, ambil semua tiket yang sedang aktif di grup ini
+        const activeTickets = await findActiveTicketsForGroup(chatId, 'telegram_group');
+
+        if (activeTickets.length === 1) {
+          // Jika hanya ada 1 tiket aktif, lakukan pencocokan relevansi standar
+          const isShort = msg.text.length < 20;
+          const replyKeywords = ["baik", "oke", "ok", "siap", "tenggat", "kapan", "aman", "done", "proses", "sudah", "terima kasih", "thanks", "tolong", "perbaiki", "yah", "ini"];
+          const hasReplyKeyword = replyKeywords.some(k => msg.text.toLowerCase().trim() === k);
+
+          if (isShort && hasReplyKeyword) {
+            parentTicket = activeTickets[0];
+          } else {
+            const isRelated = await checkMessageRelevance(msg.text, activeTickets[0].body, activeTickets[0].summary);
+            if (isRelated) {
+              parentTicket = activeTickets[0];
+            }
+          }
+        } else if (activeTickets.length > 1) {
+          // Jika ada beberapa tiket aktif sekaligus, gunakan AI routing
+          const isShort = msg.text.length < 20;
+          const replyKeywords = ["baik", "oke", "ok", "siap", "tenggat", "kapan", "aman", "done", "proses", "sudah", "terima kasih", "thanks", "tolong", "perbaiki", "yah", "ini"];
+          const hasReplyKeyword = replyKeywords.some(k => msg.text.toLowerCase().trim() === k);
+
+          if (isShort && hasReplyKeyword) {
+            // Sebagai heuristik, hubungkan ke tiket aktif paling terakhir diperbarui
+            parentTicket = activeTickets[0];
+          } else {
+            const matchedTicketId = await routeMessageToActiveTickets(msg.text, activeTickets);
+            if (matchedTicketId) {
+              parentTicket = activeTickets.find(t => t.ticket_id === matchedTicketId) || null;
+            }
+          }
+        }
+      }
+
+      if (parentTicket) {
+        console.log(`💬 Threading Telegram: Menambahkan balasan dari ${sender} ke tiket aktif ${parentTicket.ticket_id}`);
+        
+        // 1. Simpan/append ke body di database
+        await appendMessageToTicket(parentTicket.ticket_id, parentTicket.body, sender, msg.text);
+
+        // Update data sesi conversation agar menunjuk ke tiket ini
+        await createConversationSession('telegram_group', chatId, parentTicket.ticket_id, msg.text, parentTicket.summary);
+
+        // 2. Teruskan balasan ke Telegram utama (reply ke alert sebelumnya)
+        if (parentTicket.telegram_chat_id && parentTicket.telegram_message_id) {
+          try {
+            const replyText = `💬 <b>Balasan dari ${sender} (Telegram Group - Ticket ${parentTicket.ticket_id})</b>:\n\n${msg.text}`;
+            await bot.sendMessage(parentTicket.telegram_chat_id, replyText, {
+              parse_mode: "HTML",
+              reply_to_message_id: parseInt(parentTicket.telegram_message_id, 10)
+            });
+            console.log(`✅ Balasan berhasil diteruskan ke Telegram Utama (reply_to_message_id: ${parentTicket.telegram_message_id})`);
+          } catch (tgErr) {
+            console.error("⚠️ Gagal meneruskan balasan ke Telegram Utama:", tgErr.message);
+          }
+        }
+        return; // Hentikan alur, jangan buat tiket baru!
+      }
+
+      // === BUKAN FOLLOW-UP: BUAT TIKET BARU ===
       const pseudoEmail = {
         id: `TG-${Date.now()}`,
+        messageId: msg.message_id.toString(), // Actual Telegram message ID
         from: `${sender}`,
-        subject: `Laporan dari ${groupName}`,
+        subject: groupSubject,
         body: msg.text,
         source: "telegram_group",
         group_name: groupName
       };
 
       await sendIncidentAlert(pseudoEmail);
+
+      // Buat sesi conversation baru di database
+      await createConversationSession('telegram_group', chatId, pseudoEmail.id, msg.text, null);
       return;
     }
 
@@ -269,6 +357,8 @@ async function sendIncidentAlert(email, analysis = {}) {
     telegramMessageId,
     telegramChatId
   );
+
+  return { telegramMessageId, telegramChatId };
 }
 
 // ================== HANDLE STATUS CHANGE ==================

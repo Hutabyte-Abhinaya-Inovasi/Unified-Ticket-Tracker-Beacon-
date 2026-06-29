@@ -7,6 +7,7 @@ export const env = {
   TG_CHAT_ID: process.env.TG_CHAT_ID,
   ALLOWED_TELEGRAM_GROUPS: process.env.ALLOWED_TELEGRAM_GROUPS,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY,
   SUPABASE_URL: process.env.SUPABASE_URL,
   SUPABASE_KEY: process.env.SUPABASE_KEY
 };
@@ -19,8 +20,8 @@ if (!env.TG_CHAT_ID) {
   throw new Error("TG_CHAT_ID belum di set di file .env");
 }
 
-if (!env.OPENAI_API_KEY) {
-  throw new Error("OPENAI_API_KEY belum di set di file .env");
+if (!env.OPENAI_API_KEY && !env.GEMINI_API_KEY) {
+  throw new Error("OPENAI_API_KEY atau GEMINI_API_KEY belum di set di file .env");
 }
 
 if (!env.SUPABASE_URL) {
