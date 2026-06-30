@@ -89,3 +89,6 @@ export async function getLatestEmail(auth) {
     body
   };
 }
+
+// hapus saja karena tidak tepakai di email ! 
+// tergantung update jikalau ingin memakai code (migrasi !)

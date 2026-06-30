@@ -266,6 +266,97 @@ ${safeBody}
   };
 }
 
+// ==================== EXTRACT TICKET FIELDS (untuk Manual Input Telegram) ====================
+/**
+ * Ekstrak field tiket dari teks bebas menggunakan AI.
+ * Dipanggil saat user kirim teks bebas setelah /tiket baru.
+ * @param {string} rawText - Teks bebas dari user
+ * @returns {Object} - Object berisi field yang berhasil diekstrak
+ */
+async function extractTicketFields(rawText) {
+  const prompt = `
+Kamu adalah AI ITSM yang bertugas mengekstrak informasi tiket dari teks bebas.
+
+Dari teks berikut, ekstrak informasi dan kembalikan HANYA JSON valid (tanpa penjelasan tambahan):
+
+{
+  "project": "nama project atau sistem yang terdampak (null jika tidak disebutkan)",
+  "requester": "nama orang yang melaporkan masalah (null jika tidak disebutkan)",
+  "source": "sumber tiket: email | telepon | whatsapp | walk-in | telegram | lainnya (null jika tidak jelas)",
+  "reported_time": "waktu kejadian atau waktu dilaporkan dalam format HH:MM WIB atau deskripsi relatif seperti 'tadi pagi' (null jika tidak disebutkan)",
+  "category": "Incident Management | Service Request Management | Change Management | Problem Management (pilih yang paling sesuai)",
+  "issue_type": "incident | request (incident untuk masalah/kerusakan, request untuk permintaan layanan)",
+  "priority": "LOW | MEDIUM | HIGH | CRITICAL",
+  "description": "ringkasan masalah dalam 1-3 kalimat yang jelas dan informatif"
+}
+
+Aturan prioritas:
+- CRITICAL: server down, tidak bisa diakses sama sekali, production mati
+- HIGH: error, gagal, tidak bisa login, fitur utama rusak
+- MEDIUM: lambat, intermittent, sebagian fitur bermasalah
+- LOW: permintaan, pertanyaan, informasi
+
+TEKS:
+${rawText}
+`;
+
+  try {
+    const response = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: "Kamu adalah AI ITSM yang akurat. Jawab hanya dengan JSON valid, tanpa markdown, tanpa penjelasan."
+        },
+        { role: "user", content: prompt }
+      ],
+      max_tokens: 500,
+      temperature: 0.1,
+    });
+
+    let text = response.choices[0]?.message?.content || "{}";
+    text = cleanJSON(text);
+    const parsed = JSON.parse(text);
+
+    // Normalisasi nilai
+    const validCategories = [
+      "Incident Management",
+      "Service Request Management",
+      "Change Management",
+      "Problem Management"
+    ];
+    const validPriorities = ["LOW", "MEDIUM", "HIGH", "CRITICAL"];
+    const validIssueTypes = ["incident", "request"];
+    const validSources = ["email", "telepon", "whatsapp", "walk-in", "telegram", "lainnya"];
+
+    return {
+      project: parsed.project || null,
+      requester: parsed.requester || null,
+      source: validSources.includes((parsed.source || "").toLowerCase()) ? parsed.source.toLowerCase() : null,
+      reported_time: parsed.reported_time || null,
+      category: validCategories.includes(parsed.category) ? parsed.category : "Incident Management",
+      issue_type: validIssueTypes.includes((parsed.issue_type || "").toLowerCase()) ? parsed.issue_type.toLowerCase() : "incident",
+      priority: validPriorities.includes((parsed.priority || "").toUpperCase()) ? parsed.priority.toUpperCase() : "MEDIUM",
+      description: parsed.description || rawText.substring(0, 300),
+    };
+
+  } catch (err) {
+    console.error("❌ extractTicketFields error:", err.message);
+    // Fallback: kembalikan data minimal dari rules
+    const ruleResult = detectByRules(rawText);
+    return {
+      project: null,
+      requester: null,
+      source: null,
+      reported_time: null,
+      category: ruleResult.category,
+      issue_type: "incident",
+      priority: ruleResult.priority,
+      description: rawText.substring(0, 300),
+    };
+  }
+}
+
 function isSmallTalk(text) {
   const trimmed = text.trim();
   if (!trimmed) return true;
@@ -435,5 +526,6 @@ export {
   chatWithAI, 
   analyzeEmail,
   checkMessageRelevance,
-  routeMessageToActiveTickets
+  routeMessageToActiveTickets,
+  extractTicketFields
 };

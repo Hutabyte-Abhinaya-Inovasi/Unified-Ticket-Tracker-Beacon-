@@ -57,3 +57,5 @@ export function classifyByRule(email) {
     useAI: true,
   };
 }
+
+// tidak penting dengan update V1, untuk sekarang masih jalan di n8n 
