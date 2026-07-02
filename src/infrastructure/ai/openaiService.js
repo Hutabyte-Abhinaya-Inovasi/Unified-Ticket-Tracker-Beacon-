@@ -16,7 +16,7 @@ const client = new OpenAI({
 
 const AI_MODEL = isGemini ? "gemini-2.5-flash" : "gpt-4o-mini";
 
-const MAX_RETRY = 3;
+const MAX_RETRY = 5;
 
 // ==================== TOOLS DEFINITION ====================
 const tools = [
@@ -93,6 +93,25 @@ async function executeTool(toolCall) {
   }
 }
 
+// ==================== CALL OPENAI WITH RETRY ====================
+async function callOpenAIChatCompletion(options) {
+  let attempt = 0;
+  while (attempt < MAX_RETRY) {
+    try {
+      return await client.chat.completions.create(options);
+    } catch (err) {
+      attempt++;
+      if ((err.status === 429 || err.code === "rate_limit_exceeded") && attempt < MAX_RETRY) {
+        const wait = 2000 * attempt;
+        console.warn(`⏳ Rate Limit - Retry ${attempt}/${MAX_RETRY} dalam ${wait}ms`);
+        await delay(wait);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 // ==================== CHAT WITH AI ====================
 async function chatWithAI(text, context = "") {
   let messages = [
@@ -110,7 +129,7 @@ Jika user meminta update/hapus/tampilkan ticket, gunakan tool yang sesuai.`
 
   while (attempt < MAX_RETRY) {
     try {
-      const response = await client.chat.completions.create({
+      const response = await callOpenAIChatCompletion({
         model: AI_MODEL,
         messages: messages,
         tools: tools,
@@ -157,6 +176,7 @@ async function analyzeEmail(email) {
     return {
       shouldProcess: false,
       isRelevant: false,
+      confidence_score: 0,
       reason: "small_talk",
       original_message: email.body,
       subject: email.subject,
@@ -174,6 +194,7 @@ async function analyzeEmail(email) {
     return {
       shouldProcess: true,
       isRelevant: true,
+      confidence_score: 100,
       original_message: email.body,
       subject: email.subject,
       category: ruleResult.category,
@@ -186,7 +207,7 @@ async function analyzeEmail(email) {
 Anda adalah AI ITSM yang cerdas dan teliti.
 
 Tugas Anda:
-- Analisis pesan dari WhatsApp Group
+- Analisis pesan dari WhatsApp Group / Telegram / Email
 - Tentukan apakah pesan ini perlu ditindaklanjuti sebagai tiket ITSM atau hanya obrolan biasa
 - Jika tidak relevan, set "isRelevant": false
 
@@ -194,11 +215,14 @@ Balas HANYA dengan JSON valid ini, tanpa penjelasan tambahan:
 
 {
   "isRelevant": true atau false,
+  "confidence_score": 0-100,
   "original_message": "salinan pesan asli dari user (jangan diringkas)",
   "category": "Incident Management | Problem Management | Change Management | Service Request Management",
   "priority": "LOW | MEDIUM | HIGH | CRITICAL",
   "response": "balasan profesional yang sopan (kosongkan jika isRelevant = false)"
 }
+
+*Catatan untuk confidence_score: Berikan nilai 0-100 (integer) untuk mewakili seberapa yakin Anda bahwa pesan ini adalah masalah teknis/permintaan layanan riil yang membutuhkan penanganan tim support (sebagai tiket).
 
 EMAIL:
 Subject: ${safeSubject}
@@ -206,58 +230,49 @@ Body:
 ${safeBody}
 `;
 
-  let attempt = 0;
-  while (attempt < MAX_RETRY) {
-    try {
-      const response = await client.chat.completions.create({
-        model: AI_MODEL,
-        messages: [
-          { 
-            role: "system", 
-            content: "Anda adalah AI ITSM yang akurat. Selalu kembalikan pesan asli tanpa diringkas. Jawab hanya dengan JSON." 
-          },
-          { role: "user", content: prompt }
-        ],
-        max_tokens: 600,
-        temperature: 0.1,
-      });
+  try {
+    const response = await callOpenAIChatCompletion({
+      model: AI_MODEL,
+      messages: [
+        { 
+          role: "system", 
+          content: "Anda adalah AI ITSM yang akurat. Selalu kembalikan pesan asli tanpa diringkas. Jawab hanya dengan JSON." 
+        },
+        { role: "user", content: prompt }
+      ],
+      max_tokens: 600,
+      temperature: 0.1,
+    });
 
-      let text = response.choices[0]?.message?.content || "";
-      text = cleanJSON(text);
-      
-      const parsed = JSON.parse(text);
+    let text = response.choices[0]?.message?.content || "";
+    text = cleanJSON(text);
+    
+    const parsed = JSON.parse(text);
 
-      return {
-        shouldProcess: parsed.isRelevant !== false,
-        isRelevant: parsed.isRelevant !== false,
-        original_message: parsed.original_message || email.body,
-        subject: email.subject,
-        category: parsed.category || ruleResult.category,
-        priority: parsed.priority || ruleResult.priority,
-        response: parsed.response || null,
-        reason: parsed.isRelevant === false ? "ai_filtered" : "processed",
-      };
+    return {
+      shouldProcess: parsed.isRelevant !== false,
+      isRelevant: parsed.isRelevant !== false,
+      confidence_score: parsed.confidence_score !== undefined ? Number(parsed.confidence_score) : 100,
+      original_message: parsed.original_message || email.body,
+      subject: email.subject,
+      category: parsed.category || ruleResult.category,
+      priority: parsed.priority || ruleResult.priority,
+      response: parsed.response || null,
+      reason: parsed.isRelevant === false ? "ai_filtered" : "processed",
+    };
 
-    } catch (err) {
-      attempt++;
-      if (err.status === 429 || err.code === "rate_limit_exceeded") {
-        const wait = 2000 * attempt;
-        console.warn(`⏳ Rate Limit - Retry ${attempt} dalam ${wait}ms`);
-        await delay(wait);
-        continue;
-      }
-      if (err instanceof SyntaxError) {
-        console.warn("❌ JSON parse error dari AI");
-        break;
-      }
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      console.warn("❌ JSON parse error dari AI");
+    } else {
       console.error("OpenAI Error:", err.message);
-      break;
     }
   }
 
   return {
     shouldProcess: true,
     isRelevant: true,
+    confidence_score: 100,
     original_message: email.body,
     subject: email.subject,
     category: ruleResult.category,
@@ -360,7 +375,7 @@ Keluarkan hasil analisis dalam format JSON valid berikut:
   "reason": "Alasan singkat analisis Anda dalam bahasa Indonesia"
 }`;
 
-    const response = await client.chat.completions.create({
+    const response = await callOpenAIChatCompletion({
       model: AI_MODEL,
       messages: [
         { role: "system", content: "Anda hanya menjawab dengan format JSON valid." },
@@ -410,7 +425,7 @@ Keluarkan hasil analisis dalam format JSON valid berikut:
   "reason": "Alasan singkat analisis Anda dalam bahasa Indonesia"
 }`;
 
-    const response = await client.chat.completions.create({
+    const response = await callOpenAIChatCompletion({
       model: AI_MODEL,
       messages: [
         { role: "system", content: "Anda hanya menjawab dengan format JSON valid." },
@@ -431,9 +446,51 @@ Keluarkan hasil analisis dalam format JSON valid berikut:
   }
 }
 
+async function detectStatusChangeFromReply(text) {
+  try {
+    const prompt = `Anda adalah asisten triase operasional IT.
+Tugas Anda adalah menganalisis isi pesan balasan dari tim teknis/support IT untuk mendeteksi apakah pesan tersebut menyatakan bahwa tiket/masalah sudah selesai, dibatalkan, atau perlu dieskalasi.
+
+Pesan:
+"${text}"
+
+Tentukan status baru berdasarkan analisis Anda. Pilihan status yang valid:
+- "Done" (jika masalah dinyatakan selesai, teratasi, sukses dikerjakan, ok aman, dll. Contoh: "sudah selesai pak", "aman pak", "sudah beres", "solved")
+- "Escalated" (jika masalah perlu diteruskan ke level lebih tinggi, dilaporkan ke pihak lain, dll. Contoh: "ini perlu dieskalasi ke tim infra", "kami laporkan ke L3")
+- "Cancelled" (jika masalah dibatalkan, salah lapor, dll. Contoh: "batal pak", "cancel saja")
+- "no_change" (jika pesan adalah diskusi biasa dan tidak menyatakan perubahan status operasional)
+
+Keluarkan hasil dalam format JSON valid berikut:
+{
+  "newStatus": "Done" | "Escalated" | "Cancelled" | "no_change",
+  "reason": "Alasan analisis Anda dalam bahasa Indonesia"
+}`;
+
+    const response = await callOpenAIChatCompletion({
+      model: AI_MODEL,
+      messages: [
+        { role: "system", content: "Anda hanya menjawab dengan format JSON valid." },
+        { role: "user", content: prompt }
+      ],
+      response_format: { type: "json_object" }
+    });
+
+    const resultText = response.choices[0].message.content;
+    const cleanResult = cleanJSON(resultText);
+    const result = JSON.parse(cleanResult);
+
+    console.log(`🧠 AI Status Detector: detected = ${result.newStatus} (${result.reason})`);
+    return result.newStatus || "no_change";
+  } catch (err) {
+    console.error("❌ Gagal mendeteksi status tiket dari balasan dengan AI:", err.message);
+    return "no_change";
+  }
+}
+
 export { 
   chatWithAI, 
   analyzeEmail,
   checkMessageRelevance,
-  routeMessageToActiveTickets
+  routeMessageToActiveTickets,
+  detectStatusChangeFromReply
 };

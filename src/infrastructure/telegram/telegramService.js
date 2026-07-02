@@ -9,13 +9,16 @@ import {
   getTicketsByDateRange,
   getDailySummary,
   getTicketById,
+  updateTicket,
+  generateTicketId,
   findActiveTicketForThreading,
   findActiveTicketsForGroup,
   appendMessageToTicket,
   createConversationSession,
-  updateConversationLastMessage
+  updateConversationLastMessage,
+  closeConversationSessionByTicket
 } from '../../database/supabase.js';
-import { chatWithAI, checkMessageRelevance, routeMessageToActiveTickets } from '../ai/openaiService.js';
+import { chatWithAI, analyzeEmail, checkMessageRelevance, routeMessageToActiveTickets, detectStatusChangeFromReply } from '../ai/openaiService.js';
 
 let bot = null;
 
@@ -138,8 +141,9 @@ function initTelegramBot() {
         // 2. Teruskan balasan ke Telegram utama (reply ke alert sebelumnya)
         if (parentTicket.telegram_chat_id && parentTicket.telegram_message_id) {
           try {
+            const targetChatId = parentTicket.telegram_chat_id.split('|')[0];
             const replyText = `💬 <b>Balasan dari ${sender} (Telegram Group - Ticket ${parentTicket.ticket_id})</b>:\n\n${msg.text}`;
-            await bot.sendMessage(parentTicket.telegram_chat_id, replyText, {
+            await bot.sendMessage(targetChatId, replyText, {
               parse_mode: "HTML",
               reply_to_message_id: parseInt(parentTicket.telegram_message_id, 10)
             });
@@ -148,24 +152,39 @@ function initTelegramBot() {
             console.error("⚠️ Gagal meneruskan balasan ke Telegram Utama:", tgErr.message);
           }
         }
+
+        // 3. Cek apakah balasan ini menyatakan perubahan status (Done, Escalated, Cancelled)
+        try {
+          const detectedStatus = await detectStatusChangeFromReply(msg.text);
+          if (detectedStatus && detectedStatus !== 'no_change') {
+            await updateIncidentStatusAndMessage(parentTicket.ticket_id, detectedStatus, true);
+          }
+        } catch (statusErr) {
+          console.error("⚠️ Gagal memproses deteksi status otomatis dari balasan Telegram:", statusErr.message);
+        }
+
         return; // Hentikan alur, jangan buat tiket baru!
       }
 
       // === BUKAN FOLLOW-UP: BUAT TIKET BARU ===
+      const ticketId = await generateTicketId();
       const pseudoEmail = {
-        id: `TG-${Date.now()}`,
+        id: ticketId,
         messageId: msg.message_id.toString(), // Actual Telegram message ID
         from: `${sender}`,
         subject: groupSubject,
         body: msg.text,
         source: "telegram_group",
-        group_name: groupName
+        group_name: groupName,
+        group_id: chatId
       };
 
-      await sendIncidentAlert(pseudoEmail);
+      const analysis = await analyzeEmail(pseudoEmail);
+
+      await sendIncidentAlert(pseudoEmail, analysis);
 
       // Buat sesi conversation baru di database
-      await createConversationSession('telegram_group', chatId, pseudoEmail.id, msg.text, null);
+      await createConversationSession('telegram_group', chatId, pseudoEmail.id, msg.text, analysis?.summary || null);
       return;
     }
 
@@ -279,33 +298,63 @@ function escapeHTML(text = '') {
 
 // ================== CREATE FORMAL TICKET ==================
 function createFormalTicket(email, analysis = {}) {
-  const now = new Date();
+  const now = email.created_at ? new Date(email.created_at) : (email.processed_at ? new Date(email.processed_at) : new Date());
+  
+  // Format tanggal: 1/7/2026
   const tanggal = now.toLocaleDateString("id-ID", {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric"
+    day: "numeric",
+    month: "numeric",
+    year: "numeric"
   });
+  
+  // Format waktu: 14.37.12
   const waktu = now.toLocaleTimeString("id-ID", {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
+    hour12: false,
     timeZone: "Asia/Jakarta"
-  });
+  }).replace(/:/g, '.');
 
-  return `📨 <b>PESAN BARU DITERIMA</b>
+  const sourceMap = {
+    email: "EMAIL",
+    telegram_group: "TELEGRAM GROUP",
+    whatsapp: "WHATSAPP"
+  };
+  const sourceLabel = sourceMap[email.source] || (email.source || "SYSTEM").toUpperCase();
 
-Ticket ID     : ${escapeHTML(email.id)}
-Tanggal       : ${escapeHTML(tanggal)}
-Waktu         : ${escapeHTML(waktu)} WIB
+  const statusMap = {
+    Done: "✅ Resolved (Done)",
+    Escalated: "🔄 Escalated",
+    Cancelled: "❌ Cancelled",
+    NoAction: "➖ No Action Needed",
+    "In Progress": "In Progress"
+  };
+  const statusDisplay = statusMap[email.status] || email.status || "In Progress";
 
-From          : ${escapeHTML(email.from)}
-Group         : ${escapeHTML(email.group_name || email.subject || '-')}
+  const priority = (analysis.priority || email.priority || "MEDIUM").toUpperCase();
+  const category = analysis.category || email.category || "Incident Management";
+  const summary = analysis.summary || email.summary || "-";
+  const ticketId = email.id || email.ticket_id;
 
-Isi Pesan:
+  return `🚨 <b>PESAN BARU DARI ${sourceLabel}</b> 🚨
+
+<b>Ticket ID</b>: ${escapeHTML(ticketId)}
+<b>Received</b> : ${escapeHTML(tanggal)}, ${escapeHTML(waktu)} WIB
+
+<b>From</b>     : ${escapeHTML(email.from)}
+
+<b>Subject</b>  : ${escapeHTML(email.subject || email.group_name || '-')}
+
+<b>Summary</b>  :
+${escapeHTML(summary)}
+
+<b>Content</b>:
 ${escapeHTML(email.body)}
 
-────────────────────────────────────`;
+<b>Priority</b> : ${escapeHTML(priority)}
+<b>Category</b> : ${escapeHTML(category)}
+<b>Status</b>   : ${escapeHTML(statusDisplay)}`;
 }
 
 // ================== SEND INCIDENT ALERT ==================
@@ -313,9 +362,17 @@ async function sendIncidentAlert(email, analysis = {}) {
   const botInstance = initTelegramBot();
   const CHAT_ID = env.TG_CHAT_ID.trim();
 
-  let messageText = email.formalMessage || createFormalTicket(email, analysis);
+  const activeAnalysis = analysis && Object.keys(analysis).length > 0 ? analysis : (email.analysis || {});
+  const confidence = activeAnalysis.confidence_score !== undefined ? Number(activeAnalysis.confidence_score) : 100;
+  const isPending = confidence < 80;
 
-  const priority = (analysis.priority || "MEDIUM").toUpperCase();
+  let messageText = email.formalMessage || createFormalTicket(email, activeAnalysis);
+
+  if (isPending) {
+    messageText = `⚠️ <b>BUTUH KONFIRMASI (Confidence: ${confidence}%)</b>\n\n` + messageText;
+  }
+
+  const priority = (activeAnalysis.priority || "MEDIUM").toUpperCase();
 
   let telegramMessageId = null;
   let telegramChatId = null;
@@ -323,7 +380,12 @@ async function sendIncidentAlert(email, analysis = {}) {
   try {
     const keyboard = {
       reply_markup: {
-        inline_keyboard: [
+        inline_keyboard: isPending ? [
+          [
+            { text: "✅ Approve (Confirm Ticket)", callback_data: "status_In Progress" },
+            { text: "❌ Reject (No Action)", callback_data: "status_NoAction" }
+          ]
+        ] : [
           [
             { text: "✅ Resolved", callback_data: "status_Done" },
             { text: "🔄 Escalated", callback_data: "status_Escalated" }
@@ -339,7 +401,7 @@ async function sendIncidentAlert(email, analysis = {}) {
     const sent = await botInstance.sendMessage(CHAT_ID, messageText, {
       parse_mode: "HTML",
       ...keyboard,
-      disable_notification: !["HIGH", "CRITICAL"].includes(priority)
+      disable_notification: !["HIGH", "CRITICAL"].includes(priority) && !isPending
     });
 
     telegramMessageId = sent.message_id.toString();
@@ -349,22 +411,136 @@ async function sendIncidentAlert(email, analysis = {}) {
     console.error("⚠️ Gagal mengirim notifikasi alert ke Telegram:", err.message);
   }
 
+  // Simpan telegramChatId berformat "alertChatId|monitoredGroupId" agar bisa dilacak
+  const dbTelegramChatId = email.group_id && telegramChatId 
+    ? `${telegramChatId}|${email.group_id}` 
+    : telegramChatId;
+
   // Tetap simpan ke Supabase meskipun Telegram gagal
   await saveEmailLog(
     email,
-    analysis,
+    activeAnalysis,
     telegramMessageId ? true : false,
     telegramMessageId,
-    telegramChatId
+    dbTelegramChatId
   );
 
   return { telegramMessageId, telegramChatId };
 }
 
+// ====================== UPDATE TICKET STATUS AND SYNC MESSAGE ======================
+export async function updateIncidentStatusAndMessage(ticketId, newStatus, isAutomatic = true) {
+  try {
+    // 1. Ambil detail tiket dari database
+    const ticket = await getTicketById(ticketId);
+    if (!ticket) {
+      console.warn(`⚠️ Tiket ${ticketId} tidak ditemukan untuk sinkronisasi status.`);
+      return false;
+    }
+
+    // 2. Update status di database (tabel Unified_Ticket_Tracker)
+    await updateTicket(ticketId, { status: newStatus });
+    console.log(`✅ Status tiket ${ticketId} berhasil diubah ke ${newStatus} di database.`);
+
+    // 3. Jika status selesai/dibatalkan, tutup sesi di tabel conversation
+    if (["Done", "Resolved", "Cancelled"].includes(newStatus)) {
+      await closeConversationSessionByTicket(ticketId);
+    }
+
+    // 4. Update tampilan pesan alert di Telegram jika ada
+    if (ticket.telegram_chat_id && ticket.telegram_message_id) {
+      const alertChatId = ticket.telegram_chat_id.split('|')[0];
+      const alertMessageId = parseInt(ticket.telegram_message_id, 10);
+
+      const statusMap = {
+        Done: "✅ Resolved (Done)",
+        Escalated: "🔄 Escalated",
+        Cancelled: "❌ Cancelled",
+        NoAction: "➖ No Action Needed"
+      };
+      const statusDisplay = statusMap[newStatus] || newStatus;
+
+      // Reconstruct pesan alert utama dengan status baru
+      const updatedTicketData = {
+        ...ticket,
+        id: ticket.ticket_id,
+        status: newStatus
+      };
+      
+      const newAlertMessageText = createFormalTicket(updatedTicketData);
+
+      try {
+        const botInstance = initTelegramBot();
+        
+        const isPendingToActive = newStatus === "In Progress";
+        const keyboard = isPendingToActive ? {
+          inline_keyboard: [
+            [
+              { text: "✅ Resolved", callback_data: "status_Done" },
+              { text: "🔄 Escalated", callback_data: "status_Escalated" }
+            ],
+            [
+              { text: "❌ Cancel", callback_data: "status_Cancelled" },
+              { text: "➖ No Action", callback_data: "status_NoAction" }
+            ]
+          ]
+        } : { inline_keyboard: [] };
+
+        // Edit pesan utama: perbarui teks dan ganti tombol inline
+        await botInstance.editMessageText(newAlertMessageText, {
+          chat_id: alertChatId,
+          message_id: alertMessageId,
+          parse_mode: "HTML",
+          reply_markup: keyboard
+        });
+
+        // Kirim notifikasi balasan (reply) hanya jika perubahan status dideteksi secara otomatis dari chat (AI)
+        if (isAutomatic) {
+          const statusAlertText = `🔔 <b>Status Update</b>\nTiket <code>${ticketId}</code> telah otomatis diubah statusnya menjadi <b>${statusDisplay}</b> berdasarkan balasan tim teknis.`;
+          await botInstance.sendMessage(alertChatId, statusAlertText, {
+            parse_mode: "HTML",
+            reply_to_message_id: alertMessageId
+          });
+        }
+      } catch (tgErr) {
+        console.warn(`⚠️ Gagal memperbarui pesan alert Telegram untuk tiket ${ticketId}:`, tgErr.message);
+      }
+    }
+    return true;
+  } catch (err) {
+    console.error(`❌ Error in updateIncidentStatusAndMessage:`, err);
+    return false;
+  }
+}
+
 // ================== HANDLE STATUS CHANGE ==================
 async function handleStatusChange(query, chatId, newStatus) {
-  const messageId = query.message.message_id;
-  let messageText = query.message.text || "";
+  const messageText = query.message.text || "";
+  const ticketIdMatch = messageText.match(/Ticket ID\s*:\s*(TG-\d+|INC-\d+-\d+)/i);
+  const ticketId = ticketIdMatch ? ticketIdMatch[1] : null;
+
+  if (ticketId) {
+    await updateIncidentStatusAndMessage(ticketId, newStatus, false);
+  } else {
+    // Fallback jika tidak menemukan Ticket ID di teks
+    const messageId = query.message.message_id;
+    await updateIncidentStatus(messageId.toString(), newStatus);
+    
+    const statusMap = {
+      Done: "✅ Resolved (Done)",
+      Escalated: "🔄 Escalated",
+      Cancelled: "❌ Cancelled",
+      NoAction: "➖ No Action Needed"
+    };
+    const statusDisplay = statusMap[newStatus] || newStatus;
+    const cleanText = messageText.replace(/Status\s*:\s*.*/i, `Status        : ${statusDisplay}`);
+    await bot.editMessageText(cleanText, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [] }
+    });
+  }
 
   const statusMap = {
     Done: "✅ Resolved (Done)",
@@ -372,20 +548,7 @@ async function handleStatusChange(query, chatId, newStatus) {
     Cancelled: "❌ Cancelled",
     NoAction: "➖ No Action Needed"
   };
-
   const statusDisplay = statusMap[newStatus] || newStatus;
-
-  // Update teks pesan
-  messageText = messageText.replace(/Status\s*:\s*.*/i, `Status        : ${statusDisplay}`);
-
-  await bot.editMessageText(messageText, {
-    chat_id: chatId,
-    message_id: messageId,
-    parse_mode: "Markdown",
-    reply_markup: { inline_keyboard: [] }
-  });
-
-  await updateIncidentStatus(messageId.toString(), newStatus);
 
   await bot.answerCallbackQuery(query.id, {
     text: `✅ Status diubah menjadi: ${statusDisplay}`,

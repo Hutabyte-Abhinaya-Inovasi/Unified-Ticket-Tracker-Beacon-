@@ -31,13 +31,13 @@ export async function generateTicketId() {
     const { data, error } = await supabase
       .from('Unified_Ticket_Tracker')
       .select('ticket_id')
-      .like('ticket_id', `INC-${dateStr}-%`)
+      .like('ticket_id', `TCK-${dateStr}-%`)
       .order('ticket_id', { ascending: false })
       .limit(1);
 
     if (error) {
       console.error("❌ Error generate ticket_id:", error.message);
-      return `INC-${dateStr}-0001`; // Fallback
+      return `TCK-${dateStr}-0001`; // Fallback
     }
 
     let sequence = 1;
@@ -49,13 +49,13 @@ export async function generateTicketId() {
       }
     }
 
-    const newTicketId = `INC-${dateStr}-${String(sequence).padStart(4, '0')}`;
+    const newTicketId = `TCK-${dateStr}-${String(sequence).padStart(4, '0')}`;
     console.log(`✅ Generated Ticket ID: ${newTicketId}`);
     return newTicketId;
 
   } catch (err) {
     console.error("❌ Unexpected error in generateTicketId:", err);
-    return `INC-${dateStr}-0001`;
+    return `TCK-${dateStr}-0001`;
   }
 }
 
@@ -81,7 +81,9 @@ export async function saveEmailLog(email, analysis = {}, telegramSent = false, t
       telegram_sent: telegramSent,
       telegram_message_id: telegramMessageId,
       telegram_chat_id: telegramChatId,
-      status: telegramSent ? "In Progress" : "Logged (No Action)",
+      status: telegramSent
+        ? (analysis.confidence_score !== undefined && Number(analysis.confidence_score) < 80 ? "Pending Confirmation" : "In Progress")
+        : "Logged (No Action)",
       processed_at: new Date().toISOString(),
     };
 
@@ -319,9 +321,9 @@ export async function findActiveTicketsForGroup(groupId, source) {
     const { data, error } = await supabase
       .from('Unified_Ticket_Tracker')
       .select('*')
-      .eq(source === 'whatsapp' ? 'group_id' : 'telegram_chat_id', groupId)
       .eq('source', source)
       .not('status', 'in', '("Done","Resolved","Cancelled","No Action")')
+      .like('telegram_chat_id', `%|${groupId}`)
       .order('updated_at', { ascending: false })
       .limit(5);
 
@@ -357,8 +359,13 @@ export async function findActiveTicketForThreading(remoteJid, groupSubject, quot
       }
 
       if (data && data.length > 0) {
-        console.log("Ditemukan tiket induk berdasarkan quote: " + data[0].ticket_id);
-        return data[0];
+        const ticket = data[0];
+        if (["Done", "Resolved", "Cancelled"].includes(ticket.status)) {
+          console.log(`⚠️ Tiket induk ${ticket.ticket_id} ditemukan via quote tetapi statusnya adalah ${ticket.status} (CLOSED). Skip threading.`);
+        } else {
+          console.log("Ditemukan tiket induk berdasarkan quote: " + ticket.ticket_id);
+          return ticket;
+        }
       }
     }
 
@@ -394,7 +401,12 @@ export async function findActiveTicketForThreading(remoteJid, groupSubject, quot
       }
 
       if (ticketData && ticketData.length > 0) {
-        return ticketData[0];
+        const ticket = ticketData[0];
+        if (["Done", "Resolved", "Cancelled"].includes(ticket.status)) {
+          console.log(`⚠️ Sesi OPEN tapi tiket ${ticket.ticket_id} sudah ${ticket.status} (CLOSED). Skip threading.`);
+        } else {
+          return ticket;
+        }
       }
     }
 

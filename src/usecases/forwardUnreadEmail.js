@@ -35,6 +35,7 @@ export async function forwardUnreadEmail(auth) {
     return;
   }
   lastEmailId = email.id;
+  email.source = "email";
 
   console.log("📩 EMAIL BARU:", email);
 

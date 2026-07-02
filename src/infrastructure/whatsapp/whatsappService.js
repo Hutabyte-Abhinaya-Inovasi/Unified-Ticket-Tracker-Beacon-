@@ -7,8 +7,8 @@ import {
   DisconnectReason
 } from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
-import { analyzeEmail, checkMessageRelevance, routeMessageToActiveTickets } from "../ai/openaiService.js";
-import { sendIncidentAlert, initTelegramBot } from "../telegram/telegramService.js";
+import { analyzeEmail, checkMessageRelevance, routeMessageToActiveTickets, detectStatusChangeFromReply } from "../ai/openaiService.js";
+import { sendIncidentAlert, initTelegramBot, updateIncidentStatusAndMessage } from "../telegram/telegramService.js";
 import { saveEmailLog, generateTicketId, findActiveTicketForThreading, findActiveTicketsForGroup, appendMessageToTicket, createConversationSession, updateConversationLastMessage } from "../../database/supabase.js";
 
 const AUTH_FOLDER = "./auth_info";
@@ -243,9 +243,10 @@ export async function connectWhatsApp() {
         // 2. Teruskan balasan ke Telegram (reply ke alert sebelumnya)
         if (parentTicket.telegram_chat_id && parentTicket.telegram_message_id) {
           try {
+            const targetChatId = parentTicket.telegram_chat_id.split('|')[0];
             const botInstance = initTelegramBot();
             const replyText = `💬 <b>Balasan dari ${senderName} (Ticket ${parentTicket.ticket_id})</b>:\n\n${text}`;
-            await botInstance.sendMessage(parentTicket.telegram_chat_id, replyText, {
+            await botInstance.sendMessage(targetChatId, replyText, {
               parse_mode: "HTML",
               reply_to_message_id: parseInt(parentTicket.telegram_message_id, 10)
             });
@@ -254,6 +255,17 @@ export async function connectWhatsApp() {
             console.error("⚠️ Gagal meneruskan balasan ke Telegram:", tgErr.message);
           }
         }
+
+        // 3. Cek apakah balasan ini menyatakan perubahan status (Done, Escalated, Cancelled)
+        try {
+          const detectedStatus = await detectStatusChangeFromReply(text);
+          if (detectedStatus && detectedStatus !== 'no_change') {
+            await updateIncidentStatusAndMessage(parentTicket.ticket_id, detectedStatus, true);
+          }
+        } catch (statusErr) {
+          console.error("⚠️ Gagal memproses deteksi status otomatis dari balasan WhatsApp:", statusErr.message);
+        }
+
         return; // Hentikan alur, jangan buat tiket baru!
       }
 
