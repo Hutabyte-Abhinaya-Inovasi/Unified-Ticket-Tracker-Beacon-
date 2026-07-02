@@ -74,4 +74,7 @@ ${analysis.priority}
 
   // Kirim ke Telegram
   await sendIncidentAlert(email, analysis);
+
+  // Simpan log email yang berhasil dikirim
+  await saveEmailLog(email, analysis, true);
 }

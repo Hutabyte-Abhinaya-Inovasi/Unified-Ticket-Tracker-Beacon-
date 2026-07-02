@@ -128,3 +128,4 @@ export function stopOutlookListener() {
   if (imap) imap.end();
 }
 
+// untuk email dari outlook diabaikan saja ! 
