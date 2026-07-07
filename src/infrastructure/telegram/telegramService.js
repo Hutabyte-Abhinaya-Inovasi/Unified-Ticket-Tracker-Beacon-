@@ -962,12 +962,18 @@ async function handleStatusChange(query, chatId, newStatus) {
     };
     const statusDisplay = statusMap[newStatus] || newStatus;
     const cleanText = messageText.replace(/Status\s*:\s*.*/i, `Status        : ${statusDisplay}`);
-    await bot.editMessageText(cleanText, {
-      chat_id: chatId,
-      message_id: messageId,
-      parse_mode: "HTML",
-      reply_markup: { inline_keyboard: [] }
-    });
+    try {
+      await bot.editMessageText(cleanText, {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [] }
+      });
+    } catch (tgErr) {
+      if (!tgErr.message.includes("message is not modified")) {
+        console.warn("⚠️ Gagal memperbarui pesan alert fallback:", tgErr.message);
+      }
+    }
   }
 
   const statusMap = {
