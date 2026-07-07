@@ -105,6 +105,65 @@ export async function saveEmailLog(email, analysis = {}, telegramSent = false, t
     return null;
   }
 }
+
+// ====================== SAVE RAW TELEGRAM DM ======================
+/**
+ * Menyimpan pesan DM mentah dari Telegram Personal Account ke Supabase.
+ * Data disimpan dengan status 'Raw - Pending Processing' sebelum AI memproses.
+ *
+ * @param {Object} dmData - Data pesan DM dari listener
+ * @param {string} dmData.messageId    - ID pesan Telegram
+ * @param {string} dmData.senderName   - Nama pengirim
+ * @param {string} dmData.senderPhone  - Nomor HP pengirim (jika tersedia)
+ * @param {string} dmData.senderId     - User ID pengirim di Telegram
+ * @param {string} dmData.messageText  - Isi pesan
+ * @param {string} dmData.timestamp    - Waktu pesan (ISO string)
+ * @param {string} dmData.receiverPhone - Nomor HP akun support yang menerima
+ * @param {string} dmData.receiverName  - Nama akun support
+ * @returns {Object|null} Object dengan ticket_id, atau null jika gagal
+ */
+export async function saveRawTelegramDM(dmData) {
+  try {
+    const ticketId = await generateTicketId();
+
+    const payload = {
+      ticket_id:          ticketId,
+      email_id:           `TG-DM-${dmData.messageId || Date.now()}`,
+      from:               dmData.senderPhone
+                            ? `${dmData.senderName} (${dmData.senderPhone})`
+                            : dmData.senderName,
+      subject:            `[DM Pribadi] Pesan dari ${dmData.senderName}`,
+      body:               dmData.messageText,
+      summary:            null,                       // diisi AI setelah normalisasi
+      category:           'Incident Management',      // default, akan di-update AI
+      priority:           'MEDIUM',                   // default, akan di-update AI
+      source:             'telegram_personal',
+      telegram_sent:      false,                      // akan jadi true setelah alert dikirim
+      telegram_message_id: null,
+      telegram_chat_id:   null,
+      status:             'In Progress',
+      processed_at:       dmData.timestamp || new Date().toISOString(),
+    };
+
+    const { error } = await supabase
+      .from('Unified_Ticket_Tracker')
+      .insert([payload]);
+
+    if (error) {
+      console.error('❌ Gagal menyimpan raw Telegram DM:', error.message);
+      console.error('   Payload:', JSON.stringify(payload, null, 2));
+      return null;
+    }
+
+    console.log(`   ✅ Raw DM tersimpan ke Supabase: ${ticketId}`);
+    return { ticket_id: ticketId, ...payload };
+
+  } catch (err) {
+    console.error('❌ Unexpected error in saveRawTelegramDM:', err.message);
+    return null;
+  }
+}
+
 // ====================== UPDATE STATUS ======================
 /**
  * Update status tiket berdasarkan telegram_message_id

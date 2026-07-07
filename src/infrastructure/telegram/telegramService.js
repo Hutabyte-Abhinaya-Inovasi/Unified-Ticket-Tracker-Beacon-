@@ -445,9 +445,8 @@ async function handleFollowUpCallback(query, chatId, userId, data) {
   // Handle pilihan field (fq_<field>_<value>)
   // Field bisa berisi underscore (mis: issue_type, reported_time)
   // Format: fq_<fieldName>_<value>  → field = parts[0], value = parts.slice(1).join('_')
-  // Tapi FIELD_OPTIONS keys: category, priority, source, issue_type
-  // Kita cari field yang cocok dari FIELD_OPTIONS keys
-  const knownFields = ['category', 'priority', 'source', 'issue_type'];
+  // Kita cari field yang cocok dari FIELD_OPTIONS keys: category, severity, source, issue_type, project
+  const knownFields = ['category', 'severity', 'source', 'issue_type', 'project'];
   let matchedField = null;
   let matchedValue = null;
 
@@ -510,7 +509,7 @@ async function handleManualConfirm(query, chatId, userId) {
 
     const analysis = {
       category: d.category,
-      priority: d.priority,
+      severity: d.severity,
       summary: d.description,
       project: d.project,
       requester: d.requester,
@@ -523,7 +522,7 @@ async function handleManualConfirm(query, chatId, userId) {
     const tanggal = now.toLocaleDateString("id-ID", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
     const waktu = now.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Jakarta" });
 
-    const priorityEmoji = { CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡', LOW: '🟢' }[d.priority] || '⚪';
+    const severityEmoji = { emergency: '🔴', high: '🟠', medium: '🟡', low: '🟢', others: '⚪' }[(d.severity || '').toLowerCase()] || '⚪';
     const sourceMap = { email: '📧 Email', telepon: '📞 Telepon', whatsapp: '💬 WhatsApp', 'walk-in': '🚶 Walk-in', telegram: '✈️ Telegram', lainnya: '❓ Lainnya' };
 
     const alertMsg =
@@ -533,12 +532,13 @@ async function handleManualConfirm(query, chatId, userId) {
       `Waktu Input : ${escapeHTML(waktu)} WIB\n` +
       `Diinput oleh: ${escapeHTML(session.senderName)}\n\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n` +
-      `${priorityEmoji} <b>Prioritas</b>   : ${escapeHTML(d.priority || 'MEDIUM')}\n` +
+      `${severityEmoji} <b>Severity</b>    : ${escapeHTML(d.severity || 'medium')}\n` +
       `🗂 <b>Kategori</b>    : ${escapeHTML(d.category || '-')}\n` +
       `🖥 <b>Project</b>     : ${escapeHTML(d.project || '-')}\n` +
       `👤 <b>Pelapor</b>     : ${escapeHTML(d.requester || '-')}\n` +
       `📞 <b>Sumber</b>      : ${escapeHTML(sourceMap[d.source] || d.source || '-')}\n` +
       `⏰ <b>Waktu Kejadian</b>: ${escapeHTML(d.reported_time || '-')}\n` +
+      `📌 <b>Issue Type</b>  : ${escapeHTML(d.issue_type || '-')}\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n` +
       `📝 <b>Deskripsi:</b>\n${escapeHTML(d.description || session.rawText || '-')}`;
 
@@ -624,12 +624,12 @@ function buildExtractionSummary(data, extracted) {
   const fields = [
     { key: 'description',   label: '📝 Deskripsi',   emoji: '' },
     { key: 'category',      label: '🗂 Kategori',     emoji: '' },
-    { key: 'priority',      label: '🚦 Prioritas',    emoji: '' },
+    { key: 'severity',      label: '🚦 Severity',     emoji: '' },
     { key: 'project',       label: '🖥 Project',      emoji: '' },
     { key: 'requester',     label: '👤 Pelapor',      emoji: '' },
     { key: 'source',        label: '📞 Sumber',       emoji: '' },
     { key: 'reported_time', label: '⏰ Waktu',         emoji: '' },
-    { key: 'issue_type',    label: '📌 Tipe',          emoji: '' },
+    { key: 'issue_type',    label: '📌 Issue Type',   emoji: '' },
   ];
 
   let text = `🤖 <b>Hasil Analisis AI</b>\n\n`;
@@ -662,8 +662,8 @@ function formatTicketList(tickets, title) {
       day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
     });
 
-    const priorityEmoji = ticket.priority === 'CRITICAL' ? '🔴' :
-      ticket.priority === 'HIGH' ? '🟠' : '🟡';
+    const priorityEmoji = ticket.severity === 'emergency' ? '🔴' :
+      ticket.severity === 'high' ? '🟠' : '🟡';
 
     text += `${index + 1}. ${priorityEmoji} *${ticket.ticket_id}*\n`;
     text += `   👤 ${ticket.from}\n`;
@@ -791,7 +791,8 @@ async function sendIncidentAlert(email, analysis = {}, customMessage = null) {
     messageText = `⚠️ <b>BUTUH KONFIRMASI (Confidence: ${confidence}%)</b>\n\n` + messageText;
   }
 
-  const priority = (activeAnalysis.priority || "MEDIUM").toUpperCase();
+  const severity = (activeAnalysis.severity || "medium").toLowerCase();
+  const notifyLoud = ["emergency", "high"].includes(severity);
 
   let telegramMessageId = null;
   let telegramChatId = null;
@@ -820,7 +821,7 @@ async function sendIncidentAlert(email, analysis = {}, customMessage = null) {
     const sent = await botInstance.sendMessage(CHAT_ID, messageText, {
       parse_mode: "HTML",
       ...keyboard,
-      disable_notification: !["HIGH", "CRITICAL"].includes(priority) && !isPending
+      disable_notification: !notifyLoud && !isPending
     });
 
     telegramMessageId = sent.message_id.toString();

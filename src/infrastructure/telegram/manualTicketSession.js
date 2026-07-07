@@ -1,4 +1,4 @@
-﻿// src/infrastructure/telegram/manualTicketSession.js
+// src/infrastructure/telegram/manualTicketSession.js
 //
 // State machine in-memory untuk sesi manual input tiket via Telegram.
 // Setiap user memiliki sesi tersendiri yang di-track berdasarkan chatId + userId.
@@ -9,7 +9,7 @@
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 
 // Field yang WAJIB diisi (tidak bisa skip)
-export const REQUIRED_FIELDS = ['description', 'category', 'priority'];
+export const REQUIRED_FIELDS = ['description', 'category', 'severity'];
 
 // Field yang OPSIONAL (bisa dilewati)
 export const OPTIONAL_FIELDS = ['project', 'requester', 'source', 'reported_time', 'issue_type'];
@@ -18,24 +18,24 @@ export const OPTIONAL_FIELDS = ['project', 'requester', 'source', 'reported_time
 export const FIELD_LABELS = {
   description:   'Deskripsi Masalah',
   category:      'Kategori',
-  priority:      'Prioritas',
+  severity:      'Severity',
   project:       'Project / Sistem',
   requester:     'Nama Pelapor',
   source:        'Sumber Tiket',
   reported_time: 'Waktu Kejadian',
-  issue_type:    'Tipe (Incident/Request)',
+  issue_type:    'Issue Type',
 };
 
 // Pertanyaan follow-up untuk setiap field
 export const FIELD_QUESTIONS = {
   description: '📝 Tolong ceritakan lebih detail masalahnya. Apa yang terjadi?',
   category:    '🗂 Apa kategori tiket ini?',
-  priority:    '🚦 Berapa tingkat urgensi masalah ini?',
-  project:     '🖥 Sistem atau project apa yang terdampak? (contoh: SIMRS, ERP, Website)',
+  severity:    '🚦 Berapa tingkat severity masalah ini?',
+  project:     '🖥 Project atau sistem apa yang terdampak?',
   requester:   '👤 Siapa nama dan posisi orang yang melaporkan?',
   source:      '📞 Dari mana tiket ini masuk?',
   reported_time: '⏰ Kapan masalah ini terjadi atau dilaporkan? (contoh: 14:30 WIB, tadi pagi)',
-  issue_type:  '📌 Ini termasuk tipe apa?',
+  issue_type:  '📌 Pilih tipe issue ini:',
 };
 
 // Pilihan jawaban cepat (inline keyboard) untuk field tertentu
@@ -46,15 +46,30 @@ export const FIELD_OPTIONS = {
     [{ text: '🔄 Change Management', callback_data: 'fq_category_Change Management' }],
     [{ text: '🔍 Problem Management', callback_data: 'fq_category_Problem Management' }],
   ],
-  priority: [
+  severity: [
     [
-      { text: '🟢 LOW',    callback_data: 'fq_priority_LOW' },
-      { text: '🟡 MEDIUM', callback_data: 'fq_priority_MEDIUM' },
+      { text: '🔴 Emergency', callback_data: 'fq_severity_emergency' },
+      { text: '🟠 High',      callback_data: 'fq_severity_high' },
     ],
     [
-      { text: '🟠 HIGH',     callback_data: 'fq_priority_HIGH' },
-      { text: '🔴 CRITICAL', callback_data: 'fq_priority_CRITICAL' },
+      { text: '🟡 Medium',   callback_data: 'fq_severity_medium' },
+      { text: '🟢 Low',      callback_data: 'fq_severity_low' },
     ],
+    [
+      { text: '⚪ Others',   callback_data: 'fq_severity_others' },
+    ],
+  ],
+  project: [
+    [{ text: '🔷 Single Mediation',         callback_data: 'fq_project_Single Mediation' }],
+    [{ text: '🔷 Message Broker',            callback_data: 'fq_project_Message Broker' }],
+    [{ text: '🔷 APH Mediation',             callback_data: 'fq_project_APH Mediation' }],
+    [{ text: '🔷 Unified Network Mediation', callback_data: 'fq_project_Unified Network Mediation' }],
+    [{ text: '🔷 Umbrella SIEM',             callback_data: 'fq_project_Umbrella SIEM' }],
+    [{ text: '🔷 Enterprise Product Catalog',callback_data: 'fq_project_Enterprise Product Catalog' }],
+    [{ text: '🔷 B2B Service Surveillance',  callback_data: 'fq_project_B2B Service Surveillance' }],
+    [{ text: '🔷 Device Management',         callback_data: 'fq_project_Device Management' }],
+    [{ text: '🔷 CDR & LUADR',               callback_data: 'fq_project_CDR & LUADR' }],
+    [{ text: '⚪ Others',                    callback_data: 'fq_project_Others' }],
   ],
   source: [
     [
@@ -71,10 +86,12 @@ export const FIELD_OPTIONS = {
     ],
   ],
   issue_type: [
-    [
-      { text: '🚨 Incident',  callback_data: 'fq_issue_type_incident' },
-      { text: '📋 Request',   callback_data: 'fq_issue_type_request' },
-    ],
+    [{ text: '🔄 Change Management',      callback_data: 'fq_issue_type_Change Management' }],
+    [{ text: '🚨 Incident Management',    callback_data: 'fq_issue_type_Incident Management' }],
+    [{ text: '📚 Knowledge Management',   callback_data: 'fq_issue_type_Knowledge Management' }],
+    [{ text: '🔍 Problem Management',     callback_data: 'fq_issue_type_Problem Management' }],
+    [{ text: '🤝 Relationship Management',callback_data: 'fq_issue_type_Relationship Management' }],
+    [{ text: '📋 Service Request Management', callback_data: 'fq_issue_type_Service Request Management' }],
   ],
 };
 
@@ -105,7 +122,7 @@ export function createSession(chatId, userId, senderName = 'Unknown') {
     data: {
       description:   null,
       category:      null,
-      priority:      null,
+      severity:      null,
       project:       null,
       requester:     null,
       source:        null,
@@ -229,9 +246,9 @@ export function getFieldPrompt(field, canSkip = false) {
 export function formatSessionSummary(session) {
   const d = session.data;
 
-  const priorityEmoji = {
-    CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡', LOW: '🟢'
-  }[d.priority] || '⚪';
+  const severityEmoji = {
+    emergency: '🔴', high: '🟠', medium: '🟡', low: '🟢', others: '⚪'
+  }[(d.severity || '').toLowerCase()] || '⚪';
 
   const categoryShort = {
     'Incident Management':         '🚨 Incident Management',
@@ -248,12 +265,12 @@ export function formatSessionSummary(session) {
   return `📋 <b>Ringkasan Tiket</b>
 
 📌 Kategori    : ${categoryShort}
-${priorityEmoji} Prioritas    : ${d.priority || '-'}
+${severityEmoji} Severity     : ${d.severity || '-'}
 🖥 Project     : ${d.project || '<i>tidak disebutkan</i>'}
 👤 Pelapor     : ${d.requester || '<i>tidak disebutkan</i>'}
 📞 Sumber      : ${sourceMap[d.source] || d.source || '<i>tidak disebutkan</i>'}
 ⏰ Waktu       : ${d.reported_time || '<i>tidak disebutkan</i>'}
-📌 Tipe        : ${d.issue_type || '-'}
+📌 Issue Type  : ${d.issue_type || '-'}
 
 📝 <b>Deskripsi:</b>
 ${d.description || '-'}

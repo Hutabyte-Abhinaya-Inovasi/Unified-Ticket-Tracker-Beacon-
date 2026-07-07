@@ -5,12 +5,14 @@ import "dotenv/config";
 
 import { connectWhatsApp } from "./infrastructure/whatsapp/whatsappService.js";
 import { initTelegramBot } from "./infrastructure/telegram/telegramService.js";
+import { startTelegramUserListener } from "./infrastructure/telegram/telegramUserListener.js";
 import { startOutlookListener } from "./infrastructure/outlook/outlookService.js"; 
 
 console.log("🚀 Unified Incident Intake System");
 console.log("=====================================");
 
 let whatsappSock = null;
+let telegramUserClient = null;
 
 async function start() {
   try {
@@ -20,11 +22,17 @@ async function start() {
     // console.log("📧 Memulai Outlook IMAP Listener...");
     // startOutlookListener();
 
+    console.log("📱 Memulai Telegram Personal Account Listener (MTProto)...");
+    telegramUserClient = await startTelegramUserListener(); // ← Akan minta OTP jika belum ada session
+
     console.log("📱 Memulai WhatsApp Connection...");
     whatsappSock = await connectWhatsApp();
 
     console.log("\n✅ Semua sistem berhasil dijalankan!");
     console.log("   • Telegram Bot (dengan Menu & AI)");
+    if (telegramUserClient) {
+      console.log("   • Telegram Personal DM Listener (MTProto)");
+    }
     console.log("   • WhatsApp Listener");
     
     console.log("=====================================");
@@ -46,6 +54,11 @@ process.on("SIGINT", async () => {
     if (whatsappSock) {
       console.log("📴 Menutup WhatsApp connection...");
       whatsappSock.end();
+    }
+
+    if (telegramUserClient) {
+      console.log("📴 Menutup Telegram User connection...");
+      await telegramUserClient.disconnect().catch(() => {});
     }
 
     // Telegram Bot tidak perlu disconnect manual karena polling akan ikut mati

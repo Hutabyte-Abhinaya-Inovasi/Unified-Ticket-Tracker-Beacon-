@@ -218,7 +218,7 @@ Balas HANYA dengan JSON valid ini, tanpa penjelasan tambahan:
   "confidence_score": 0-100,
   "original_message": "salinan pesan asli dari user (jangan diringkas)",
   "category": "Incident Management | Problem Management | Change Management | Service Request Management",
-  "priority": "LOW | MEDIUM | HIGH | CRITICAL",
+  "severity": "emergency | high | medium | low | others",
   "response": "balasan profesional yang sopan (kosongkan jika isRelevant = false)"
 }
 
@@ -295,21 +295,22 @@ Kamu adalah AI ITSM yang bertugas mengekstrak informasi tiket dari teks bebas.
 Dari teks berikut, ekstrak informasi dan kembalikan HANYA JSON valid (tanpa penjelasan tambahan):
 
 {
-  "project": "nama project atau sistem yang terdampak (null jika tidak disebutkan)",
+  "project": "nama project yang terdampak, pilih salah satu: Single Mediation | Message Broker | APH Mediation | Unified Network Mediation | Umbrella SIEM | Enterprise Product Catalog | B2B Service Surveillance | Device Management | CDR & LUADR | Others (null jika tidak disebutkan)",
   "requester": "nama orang yang melaporkan masalah (null jika tidak disebutkan)",
   "source": "sumber tiket: email | telepon | whatsapp | walk-in | telegram | lainnya (null jika tidak jelas)",
   "reported_time": "waktu kejadian atau waktu dilaporkan dalam format HH:MM WIB atau deskripsi relatif seperti 'tadi pagi' (null jika tidak disebutkan)",
   "category": "Incident Management | Service Request Management | Change Management | Problem Management (pilih yang paling sesuai)",
-  "issue_type": "incident | request (incident untuk masalah/kerusakan, request untuk permintaan layanan)",
-  "priority": "LOW | MEDIUM | HIGH | CRITICAL",
+  "issue_type": "Change Management | Incident Management | Knowledge Management | Problem Management | Relationship Management | Service Request Management (pilih yang paling sesuai)",
+  "severity": "emergency | high | medium | low | others",
   "description": "ringkasan masalah dalam 1-3 kalimat yang jelas dan informatif"
 }
 
-Aturan prioritas:
-- CRITICAL: server down, tidak bisa diakses sama sekali, production mati
-- HIGH: error, gagal, tidak bisa login, fitur utama rusak
-- MEDIUM: lambat, intermittent, sebagian fitur bermasalah
-- LOW: permintaan, pertanyaan, informasi
+Aturan severity:
+- emergency: server down total, tidak bisa diakses sama sekali, production mati, darurat
+- high: error kritis, gagal, tidak bisa login, fitur utama rusak
+- medium: lambat, intermittent, sebagian fitur bermasalah
+- low: pertanyaan, informasi, permintaan minor
+- others: tidak termasuk kategori di atas
 
 TEKS:
 ${rawText}
@@ -340,18 +341,30 @@ ${rawText}
       "Change Management",
       "Problem Management"
     ];
-    const validPriorities = ["LOW", "MEDIUM", "HIGH", "CRITICAL"];
-    const validIssueTypes = ["incident", "request"];
+    const validSeverities = ["emergency", "high", "medium", "low", "others"];
+    const validIssueTypes = [
+      "Change Management",
+      "Incident Management",
+      "Knowledge Management",
+      "Problem Management",
+      "Relationship Management",
+      "Service Request Management"
+    ];
+    const validProjects = [
+      "Single Mediation", "Message Broker", "APH Mediation",
+      "Unified Network Mediation", "Umbrella SIEM", "Enterprise Product Catalog",
+      "B2B Service Surveillance", "Device Management", "CDR & LUADR", "Others"
+    ];
     const validSources = ["email", "telepon", "whatsapp", "walk-in", "telegram", "lainnya"];
 
     return {
-      project: parsed.project || null,
+      project: validProjects.includes(parsed.project) ? parsed.project : (parsed.project || null),
       requester: parsed.requester || null,
       source: validSources.includes((parsed.source || "").toLowerCase()) ? parsed.source.toLowerCase() : null,
       reported_time: parsed.reported_time || null,
       category: validCategories.includes(parsed.category) ? parsed.category : "Incident Management",
-      issue_type: validIssueTypes.includes((parsed.issue_type || "").toLowerCase()) ? parsed.issue_type.toLowerCase() : "incident",
-      priority: validPriorities.includes((parsed.priority || "").toUpperCase()) ? parsed.priority.toUpperCase() : "MEDIUM",
+      issue_type: validIssueTypes.includes(parsed.issue_type) ? parsed.issue_type : "Incident Management",
+      severity: validSeverities.includes((parsed.severity || "").toLowerCase()) ? parsed.severity.toLowerCase() : "medium",
       description: parsed.description || rawText.substring(0, 300),
     };
 
@@ -365,8 +378,8 @@ ${rawText}
       source: null,
       reported_time: null,
       category: ruleResult.category,
-      issue_type: "incident",
-      priority: ruleResult.priority,
+      issue_type: "Incident Management",
+      severity: ruleResult.severity,
       description: rawText.substring(0, 300),
     };
   }
@@ -411,13 +424,13 @@ function delay(ms) {
 
 function detectByRules(text) {
   const lowerText = text.toLowerCase();
-  let priority = "LOW";
+  let priority = "medium";
   let category = "Service Request Management";
 
   const PRIORITY_RULES = [
-    { keyword: ["down", "server mati", "tidak bisa diakses", "mati total", "offline"], priority: "CRITICAL" },
-    { keyword: ["error", "failed", "gagal", "tidak bisa", "crash"], priority: "HIGH" },
-    { keyword: ["lambat", "slow", "lemot", "delay"], priority: "MEDIUM" },
+    { keyword: ["down", "server mati", "tidak bisa diakses", "mati total", "offline"], priority: "emergency" },
+    { keyword: ["error", "failed", "gagal", "tidak bisa", "crash"], priority: "high" },
+    { keyword: ["lambat", "slow", "lemot", "delay"], priority: "medium" },
   ];
 
   const CATEGORY_RULES = [
@@ -441,7 +454,7 @@ function detectByRules(text) {
     }
   }
 
-  return { priority, category };
+  return { severity: priority, category };
 }
 
 async function checkMessageRelevance(newMessage, activeTicketBody, activeTicketSummary) {

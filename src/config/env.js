@@ -9,7 +9,12 @@ export const env = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
   SUPABASE_URL: process.env.SUPABASE_URL,
-  SUPABASE_KEY: process.env.SUPABASE_KEY
+  SUPABASE_KEY: process.env.SUPABASE_KEY,
+  // Telegram MTProto User API
+  TG_API_ID: process.env.TG_API_ID ? parseInt(process.env.TG_API_ID, 10) : null,
+  TG_API_HASH: process.env.TG_API_HASH || null,
+  TG_PHONE_NUMBER: process.env.TG_PHONE_NUMBER || null,
+  TG_2FA_PASSWORD: process.env.TG_2FA_PASSWORD || null,
 };
 
 if (!env.TG_TOKEN) {
@@ -35,4 +40,12 @@ if (!env.SUPABASE_KEY) {
 if (!env.ALLOWED_TELEGRAM_GROUPS) {
   console.warn("ALLOWED_TELEGRAM_GROUPS belum di set di file .env. Bot akan merespon dari semua grup.");
   env.ALLOWED_TELEGRAM_GROUPS = "";   
+}
+
+// Telegram User API (MTProto) — opsional, warning saja jika belum diisi
+if (!env.TG_API_ID || !env.TG_API_HASH) {
+  console.warn("⚠️  TG_API_ID / TG_API_HASH belum di set. Telegram Personal Listener tidak akan berjalan.");
+}
+if (!env.TG_PHONE_NUMBER) {
+  console.warn("⚠️  TG_PHONE_NUMBER belum di set. Telegram Personal Listener tidak akan berjalan.");
 }
