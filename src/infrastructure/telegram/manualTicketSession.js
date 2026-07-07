@@ -60,16 +60,26 @@ export const FIELD_OPTIONS = {
     ],
   ],
   project: [
-    [{ text: '🔷 Single Mediation',         callback_data: 'fq_project_Single Mediation' }],
-    [{ text: '🔷 Message Broker',            callback_data: 'fq_project_Message Broker' }],
-    [{ text: '🔷 APH Mediation',             callback_data: 'fq_project_APH Mediation' }],
-    [{ text: '🔷 Unified Network Mediation', callback_data: 'fq_project_Unified Network Mediation' }],
-    [{ text: '🔷 Umbrella SIEM',             callback_data: 'fq_project_Umbrella SIEM' }],
-    [{ text: '🔷 Enterprise Product Catalog',callback_data: 'fq_project_Enterprise Product Catalog' }],
-    [{ text: '🔷 B2B Service Surveillance',  callback_data: 'fq_project_B2B Service Surveillance' }],
-    [{ text: '🔷 Device Management',         callback_data: 'fq_project_Device Management' }],
-    [{ text: '🔷 CDR & LUADR',               callback_data: 'fq_project_CDR & LUADR' }],
-    [{ text: '⚪ Others',                    callback_data: 'fq_project_Others' }],
+    [
+      { text: '🔷 Single Mediation',         callback_data: 'fq_project_Single Mediation' },
+      { text: '🔷 Message Broker',            callback_data: 'fq_project_Message Broker' }
+    ],
+    [
+      { text: '🔷 APH Mediation',             callback_data: 'fq_project_APH Mediation' },
+      { text: '🔷 Unified Network Mediation', callback_data: 'fq_project_Unified Network Mediation' }
+    ],
+    [
+      { text: '🔷 Umbrella SIEM',             callback_data: 'fq_project_Umbrella SIEM' },
+      { text: '🔷 Enterprise Catalog',        callback_data: 'fq_project_Enterprise Product Catalog' }
+    ],
+    [
+      { text: '🔷 B2B Surveillance',          callback_data: 'fq_project_B2B Service Surveillance' },
+      { text: '🔷 Device Management',         callback_data: 'fq_project_Device Management' }
+    ],
+    [
+      { text: '🔷 CDR & LUADR',               callback_data: 'fq_project_CDR & LUADR' },
+      { text: '⚪ Others',                    callback_data: 'fq_project_Others' }
+    ]
   ],
   source: [
     [

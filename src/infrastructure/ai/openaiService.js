@@ -364,7 +364,7 @@ ${rawText}
       reported_time: parsed.reported_time || null,
       category: validCategories.includes(parsed.category) ? parsed.category : "Incident Management",
       issue_type: validIssueTypes.includes(parsed.issue_type) ? parsed.issue_type : "Incident Management",
-      severity: validSeverities.includes((parsed.severity || "").toLowerCase()) ? parsed.severity.toLowerCase() : "medium",
+      severity: null, // Dipaksa null agar selalu dipilih manual oleh user
       description: parsed.description || rawText.substring(0, 300),
     };
 
@@ -379,7 +379,7 @@ ${rawText}
       reported_time: null,
       category: ruleResult.category,
       issue_type: "Incident Management",
-      severity: ruleResult.severity,
+      severity: null, // Dipaksa null agar selalu dipilih manual oleh user
       description: rawText.substring(0, 300),
     };
   }
