@@ -257,7 +257,12 @@ function initTelegramBot() {
     // ── PRIORITAS 3: Main group → balas dengan AI ──
     if (isMainGroup) {
       const aiReply = await chatWithAI(msg.text);
-      await bot.sendMessage(chatId, aiReply, { parse_mode: "Markdown" });
+      try {
+        await bot.sendMessage(chatId, aiReply, { parse_mode: "Markdown" });
+      } catch (err) {
+        console.warn("⚠️ Gagal mengirim pesan markdown AI, mengirim plain text fallback:", err.message);
+        await bot.sendMessage(chatId, aiReply);
+      }
       return;
     }
   });
@@ -266,7 +271,12 @@ function initTelegramBot() {
   bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const userId = query.from?.id?.toString() || 'unknown';
-    await bot.answerCallbackQuery(query.id);
+    
+    // Jangan panggil answerCallbackQuery di awal jika data berupa update status,
+    // karena handleStatusChange akan memanggil answerCallbackQuery dengan toast kustom.
+    if (!query.data?.startsWith('status_')) {
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+    }
 
     const data = query.data;
 
@@ -652,10 +662,10 @@ function buildExtractionSummary(data, extracted) {
 // ================== HELPER FORMAT TIKET ==================
 function formatTicketList(tickets, title) {
   if (!tickets || tickets.length === 0) {
-    return `${title}\n\nTidak ada tiket ditemukan.`;
+    return `<b>${escapeHTML(title)}</b>\n\nTidak ada tiket ditemukan.`;
   }
 
-  let text = `${title} (${tickets.length} tiket)\n\n`;
+  let text = `<b>${escapeHTML(title)}</b> (${tickets.length} tiket)\n\n`;
 
   tickets.slice(0, 15).forEach((ticket, index) => {
     const date = new Date(ticket.processed_at).toLocaleDateString('id-ID', {
@@ -665,11 +675,12 @@ function formatTicketList(tickets, title) {
     const priorityEmoji = ticket.priority === 'CRITICAL' ? '🔴' :
       ticket.priority === 'HIGH' ? '🟠' : '🟡';
 
-    text += `${index + 1}. ${priorityEmoji} *${ticket.ticket_id}*\n`;
-    text += `   👤 ${ticket.from}\n`;
-    text += `   📌 ${ticket.status || 'In Progress'}\n`;
-    text += `   ⏰ ${date}\n`;
-    text += `   💬 ${ticket.body ? ticket.body.substring(0, 80) + '...' : '-'}\n\n`;
+    text += `${index + 1}. ${priorityEmoji} <b>${escapeHTML(ticket.ticket_id)}</b>\n`;
+    text += `   👤 ${escapeHTML(ticket.from || '-')}\n`;
+    text += `   📌 ${escapeHTML(ticket.status || 'In Progress')}\n`;
+    text += `   ⏰ ${escapeHTML(date)}\n`;
+    const snippet = ticket.body ? ticket.body.substring(0, 80) + (ticket.body.length > 80 ? '...' : '') : '-';
+    text += `   💬 <i>${escapeHTML(snippet)}</i>\n\n`;
   });
 
   if (tickets.length > 15) {
@@ -683,13 +694,13 @@ function formatTicketList(tickets, title) {
 async function showTickets(chatId, status, title) {
   const tickets = await getTicketsByStatus(status);
   const message = formatTicketList(tickets, title);
-  await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+  await bot.sendMessage(chatId, message, { parse_mode: "HTML" });
 }
 
 async function showTicketsByDays(chatId, days, title) {
   const tickets = await getTicketsByDateRange(days);
   const message = formatTicketList(tickets, title);
-  await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+  await bot.sendMessage(chatId, message, { parse_mode: "HTML" });
 }
 
 // ================== DAILY SUMMARY ==================
@@ -975,12 +986,12 @@ async function handleStatusChange(query, chatId, newStatus) {
 
 // ================== MENU & INFO ==================
 async function sendGroupInfo(msg) {
-  const text = `📌 *Group Information*\n\n` +
-    `Group ID   : \`${msg.chat.id}\`\n` +
-    `Nama Grup  : ${msg.chat.title || "Private Chat"}\n` +
-    `Tipe       : ${msg.chat.type}`;
+  const text = `📌 <b>Group Information</b>\n\n` +
+    `Group ID   : <code>${escapeHTML(msg.chat.id.toString())}</code>\n` +
+    `Nama Grup  : ${escapeHTML(msg.chat.title || "Private Chat")}\n` +
+    `Tipe       : ${escapeHTML(msg.chat.type)}`;
 
-  await bot.sendMessage(msg.chat.id, text, { parse_mode: "Markdown" });
+  await bot.sendMessage(msg.chat.id, text, { parse_mode: "HTML" });
 }
 
 async function sendMainMenu(msg) {
