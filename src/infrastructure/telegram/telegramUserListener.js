@@ -53,6 +53,12 @@ function sanitizePhone(phone) {
 // HELPER: Baca / Tulis Session String dari file
 // ──────────────────────────────────────────────────────────────────
 function loadSession(sessionFile) {
+  // Prioritas 1: dari environment variable (untuk deployment di server)
+  if (env.TG_SESSION_STRING && env.TG_SESSION_STRING.trim() !== '') {
+    console.log(`   🔑 Session dimuat dari TG_SESSION_STRING (env)`);
+    return env.TG_SESSION_STRING.trim();
+  }
+  // Prioritas 2: dari file lokal
   try {
     if (existsSync(sessionFile)) {
       const raw = readFileSync(sessionFile, 'utf8').trim();
