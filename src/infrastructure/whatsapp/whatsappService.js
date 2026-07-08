@@ -2,16 +2,17 @@
 import P from "pino";
 import {
   makeWASocket,
-  useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason
 } from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
+import { useSupabaseAuthState } from "./supabaseAuthState.js";
 import { analyzeEmail, checkMessageRelevance, routeMessageToActiveTickets, detectStatusChangeFromReply } from "../ai/openaiService.js";
 import { sendIncidentAlert, initTelegramBot, updateIncidentStatusAndMessage } from "../telegram/telegramService.js";
 import { saveEmailLog, generateTicketId, findActiveTicketForThreading, findActiveTicketsForGroup, appendMessageToTicket, createConversationSession, updateConversationLastMessage } from "../../database/supabase.js";
 
-const AUTH_FOLDER = "./auth_info";
+// Railway environment flag — di Railway tidak ada terminal interaktif untuk scan QR
+const IS_RAILWAY = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RAILWAY_SERVICE_ID;
 
 const groupCache = new Map();
 
@@ -96,10 +97,36 @@ ${pseudoEmail.body}
 ────────────────────────────────────`;
 }
 
+/**
+ * Kirim QR code ke Telegram sebagai teks/gambar agar bisa di-scan dari Railway.
+ * @param {string} qr - QR code string dari Baileys
+ */
+async function sendQRToTelegram(qr) {
+  try {
+    const TelegramBot = (await import("node-telegram-bot-api")).default;
+    const token = process.env.TG_TOKEN;
+    const chatId = process.env.TG_CHAT_ID;
+    if (!token || !chatId) return;
+
+    const bot = new TelegramBot(token);
+    await bot.sendMessage(
+      chatId,
+      `🔗 *WhatsApp QR Code diperlukan!*\n\nAplikasi berjalan di Railway dan memerlukan autentikasi ulang WhatsApp.\n\n` +
+      `Salin kode QR berikut ke situs https://wa-qr.netlify.app atau aplikasi QR reader:\n\n` +
+      `\`${qr}\``,
+      { parse_mode: "Markdown" }
+    );
+    console.log("📤 QR code dikirim ke Telegram!");
+  } catch (err) {
+    console.error("⚠️ Gagal kirim QR ke Telegram:", err.message);
+  }
+}
+
 export async function connectWhatsApp() {
   if (sock) return sock;
 
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
+  console.log("🔑 Memuat WhatsApp auth dari Supabase...");
+  const { state, saveCreds } = await useSupabaseAuthState();
   const { version } = await fetchLatestBaileysVersion();
 
   console.log("📱 Starting WhatsApp connection...");
@@ -107,7 +134,7 @@ export async function connectWhatsApp() {
   sock = makeWASocket({
     auth: state,
     logger: P({ level: "silent" }),
-    printQRInTerminal: true,
+    printQRInTerminal: !IS_RAILWAY,  // Di Railway, jangan print QR ke terminal
     browser: ["Unified Incident Bot", "Chrome", "1.0.0"],
     version,
     markOnlineOnConnect: false
@@ -122,7 +149,15 @@ export async function connectWhatsApp() {
       console.log("\n" + "=".repeat(60));
       console.log("📱 SCAN QR CODE DENGAN WHATSAPP");
       console.log("=".repeat(60));
-      qrcode.generate(qr, { small: true });
+
+      if (IS_RAILWAY) {
+        // Di Railway: kirim QR ke Telegram karena tidak ada terminal interaktif
+        console.log("🚂 Terdeteksi Railway environment — mengirim QR ke Telegram...");
+        await sendQRToTelegram(qr);
+      } else {
+        // Di lokal: tampilkan QR di terminal seperti biasa
+        qrcode.generate(qr, { small: true });
+      }
     }
 
     if (connection === "open") {
