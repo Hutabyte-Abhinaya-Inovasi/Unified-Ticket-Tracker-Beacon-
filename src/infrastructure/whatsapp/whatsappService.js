@@ -9,7 +9,8 @@ import {
 import qrcode from "qrcode-terminal";
 import { analyzeEmail, checkMessageRelevance, routeMessageToActiveTickets, detectStatusChangeFromReply } from "../ai/openaiService.js";
 import { sendIncidentAlert, initTelegramBot, updateIncidentStatusAndMessage } from "../telegram/telegramService.js";
-import { saveEmailLog, generateTicketId, findActiveTicketForThreading, findActiveTicketsForGroup, appendMessageToTicket, createConversationSession, updateConversationLastMessage } from "../../database/supabase.js";
+import { saveEmailLog, generateTicketId, findActiveTicketForThreading, findActiveTicketsForGroup, appendMessageToTicket, createConversationSession, updateConversationLastMessage, supabase, saveRawIntakeMessage } from "../../database/supabase.js";
+import { useSupabaseAuthState } from "./supabaseAuthState.js";
 
 const AUTH_FOLDER = "./auth_info";
 
@@ -99,7 +100,16 @@ ${pseudoEmail.body}
 export async function connectWhatsApp() {
   if (sock) return sock;
 
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
+  let authState;
+  if (process.env.USE_SUPABASE_AUTH === "true") {
+    console.log("📱 Menggunakan Supabase Auth State untuk WhatsApp...");
+    authState = await useSupabaseAuthState(supabase, "whatsapp-session");
+  } else {
+    console.log("📱 Menggunakan Local File Auth State untuk WhatsApp...");
+    authState = await useMultiFileAuthState(AUTH_FOLDER);
+  }
+
+  const { state, saveCreds } = authState;
   const { version } = await fetchLatestBaileysVersion();
 
   console.log("📱 Starting WhatsApp connection...");
@@ -187,6 +197,22 @@ export async function connectWhatsApp() {
       console.log(`From  : ${senderName}`);
       console.log(`Text  : ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`);
 
+      // === STEP 0: SIMPAN PESAN MENTAH KE raw_intake_messages ===
+      // Ini terjadi untuk SETIAP pesan yang masuk, sebelum diproses AI apapun.
+      await saveRawIntakeMessage({
+        message_id:   msg.key.id,
+        source:       'whatsapp',
+        sender_name:  senderName,
+        sender_phone: null,  // WhatsApp tidak selalu expose nomor HP
+        sender_id:    msg.key.participant || msg.key.remoteJid,
+        message_text: text,
+        group_id:     remoteJid,
+        group_name:   getGroupSubject(remoteJid),
+        wa_timestamp: msg.messageTimestamp
+          ? new Date(Number(msg.messageTimestamp) * 1000).toISOString()
+          : new Date().toISOString(),
+      }).catch(err => console.warn('⚠️ Gagal simpan raw message, proses tetap lanjut:', err.message));
+
       const quotedStanzaId = msg.message.extendedTextMessage?.contextInfo?.stanzaId || null;
       const groupSubject = getGroupSubject(remoteJid);
 
@@ -269,7 +295,7 @@ export async function connectWhatsApp() {
         return; // Hentikan alur, jangan buat tiket baru!
       }
 
-      // === BUKAN FOLLOW-UP: BUAT TIKET BARU ===
+      // === STEP 0: Update ticket_id di raw_intake_messages setelah tiket dibuat ===
       const ticketId = await generateTicketId();
 
       const pseudoEmail = {

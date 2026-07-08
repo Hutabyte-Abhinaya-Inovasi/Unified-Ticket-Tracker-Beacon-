@@ -22,11 +22,11 @@ async function start() {
     // console.log("📧 Memulai Outlook IMAP Listener...");
     // startOutlookListener();
 
-    console.log("📱 Memulai Telegram Personal Account Listener (MTProto)...");
-    telegramUserClient = await startTelegramUserListener(); // ← Akan minta OTP jika belum ada session
-
     console.log("📱 Memulai WhatsApp Connection...");
     whatsappSock = await connectWhatsApp();
+
+    console.log("📱 Memulai Telegram Personal Account Listener (MTProto)...");
+    telegramUserClient = await startTelegramUserListener(); // ← Hanya minta OTP jika session belum ada
 
     console.log("\n✅ Semua sistem berhasil dijalankan!");
     console.log("   • Telegram Bot (dengan Menu & AI)");

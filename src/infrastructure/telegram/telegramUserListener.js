@@ -98,6 +98,24 @@ function createPrompt(question) {
 // ──────────────────────────────────────────────────────────────────
 // CORE: Mulai listener untuk satu akun
 // ──────────────────────────────────────────────────────────────────
+
+/**
+ * Cek apakah kita sedang berjalan di server (Railway, Docker, CI)
+ * atau di mesin developer lokal.
+ * Di lokal: selalu bisa input OTP interaktif.
+ * Di Railway/Docker/CI: tidak ada input interaktif.
+ */
+function isInteractiveEnvironment() {
+  // Railway menyuntikkan RAILWAY_ENVIRONMENT
+  if (process.env.RAILWAY_ENVIRONMENT) return false;
+  // Flag CI standar (GitHub Actions, dsb.)
+  if (process.env.CI === 'true') return false;
+  // Jika eksplisit diset oleh user
+  if (process.env.NON_INTERACTIVE === 'true') return false;
+  // Di lokal selalu anggap interaktif
+  return true;
+}
+
 async function startUserAccount(account) {
   const { apiId, apiHash, phoneNumber, twoFaPassword, sessionFile } = account;
 
@@ -105,41 +123,88 @@ async function startUserAccount(account) {
   console.log(`   Nomor   : ${phoneNumber}`);
   console.log(`   api_id  : ${apiId}`);
 
-  // Load session yang tersimpan (jika ada)
+  // ── CEK AWAL: Session harus ada jika di server ──
   const savedSession = loadSession(sessionFile);
-  const stringSession = new StringSession(savedSession);
+
+  if (!savedSession) {
+    if (!isInteractiveEnvironment()) {
+      // Di Railway/server: tidak bisa input OTP, skip saja
+      console.warn(`\n⚠️  [Telegram User] Tidak ada session yang tersimpan.`);
+      console.warn(`   Di server non-interaktif, tidak bisa meminta OTP.`);
+      console.warn(`   👉 Jalankan dulu di lokal, login OTP sekali, lalu salin TG_SESSION_STRING ke Railway.`);
+      return null;
+    }
+    console.log(`   📭 Belum ada session tersimpan. Akan meminta OTP...`);
+  }
+
+  const stringSession = new StringSession(savedSession || '');
 
   // Buat client gramjs
-  const client = new TelegramClient(stringSession, apiId, apiHash, {
-    connectionRetries: 5,
-    retryDelay: 1000,
+  const client = new TelegramClient(stringSession, parseInt(apiId), apiHash, {
+    connectionRetries: 3,
+    retryDelay: 2000,
     autoReconnect: true,
     useWSS: false,
   });
 
+  // ── Tangani flood wait sebelum memulai ──
+  let otpFloodWait = 0;
+
   // ── Login (jika session kosong, akan meminta OTP) ──
-  await client.start({
-    phoneNumber: async () => phoneNumber,
+  try {
+    await client.start({
+      phoneNumber: async () => phoneNumber,
 
-    password: async () => {
-      if (twoFaPassword) {
-        console.log(`   🔐 Menggunakan 2FA password dari .env`);
-        return twoFaPassword;
-      }
-      return await createPrompt(`\n🔐 Masukkan password 2FA Telegram (${phoneNumber}): `);
-    },
+      password: async () => {
+        if (twoFaPassword) {
+          console.log(`   🔐 Menggunakan 2FA password dari .env`);
+          return twoFaPassword;
+        }
+        if (!isInteractiveEnvironment()) {
+          throw new Error('TG_2FA_PASSWORD tidak diset di .env, dan lingkungan non-interaktif tidak bisa meminta input.');
+        }
+        return await createPrompt(`\n🔐 Masukkan password 2FA Telegram (${phoneNumber}): `);
+      },
 
-    phoneCode: async () => {
-      const code = await createPrompt(
-        `\n📲 Kode OTP telah dikirim Telegram ke ${phoneNumber}.\n   Masukkan kode OTP: `
-      );
-      return code;
-    },
+      phoneCode: async () => {
+        if (!isInteractiveEnvironment()) {
+          throw new Error('Lingkungan non-interaktif tidak bisa menerima kode OTP.');
+        }
+        const code = await createPrompt(
+          `\n📲 Kode OTP telah dikirim Telegram ke ${phoneNumber}.\n   Masukkan kode OTP: `
+        );
+        return code;
+      },
 
-    onError: (err) => {
-      console.error(`❌ Error login Telegram User (${phoneNumber}):`, err.message);
-    },
-  });
+      onError: (err) => {
+        const msg = err.message || '';
+        // Deteksi flood wait — catat durasi dan JANGAN retry
+        const floodMatch = msg.match(/wait of (\d+) seconds/i);
+        if (floodMatch) {
+          otpFloodWait = parseInt(floodMatch[1]);
+          console.error(`\n🚫 [Telegram] Flood wait aktif — Telegram membatasi permintaan OTP.`);
+          console.error(`   Coba lagi dalam ${Math.ceil(otpFloodWait / 60)} menit (${otpFloodWait} detik).`);
+          // Lempar error agar client.start() berhenti, bukan retry
+          throw err;
+        }
+        console.error(`❌ Error login Telegram User (${phoneNumber}):`, msg);
+        throw err;
+      },
+    });
+  } catch (err) {
+    const msg = err.message || '';
+    if (msg.match(/wait of \d+ seconds/i) || otpFloodWait > 0) {
+      console.warn(`\n⏳ Telegram User Listener dilewati sementara karena flood wait.`);
+      console.warn(`   Bot dan WhatsApp tetap berjalan normal.`);
+      return null;  // Jangan crash, biarkan service lain jalan
+    }
+    if (msg.includes('non-interaktif') || msg.includes('tidak bisa')) {
+      console.warn(`\n⚠️  Telegram User Listener dilewati: ${msg}`);
+      return null;
+    }
+    console.error(`❌ Gagal login Telegram User (${phoneNumber}):`, msg);
+    return null;
+  }
 
   // Simpan session setelah berhasil login
   const newSession = client.session.save();

@@ -67,6 +67,16 @@ function initTelegramBot() {
     }
   });
 
+  // Cegah spam log di terminal jika token tidak valid (401)
+  bot.on("polling_error", (err) => {
+    if (err.message.includes("401")) {
+      console.error("❌ Telegram Bot Polling Error: 401 Unauthorized. Token bot di .env tidak valid atau expired. Polling dinonaktifkan.");
+      bot.stopPolling();
+    } else {
+      console.warn("⚠️ Telegram Bot Polling Error:", err.message);
+    }
+  });
+
   console.log(`🤖 Telegram Bot started successfully`);
   console.log(`   Main Chat ID     : ${MAIN_CHAT_ID}`);
   console.log(`   Monitored Groups : ${ALLOWED_TELEGRAM_GROUPS.length || 'Tidak ada'}`);

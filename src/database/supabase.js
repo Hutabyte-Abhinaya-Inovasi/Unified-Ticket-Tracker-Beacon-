@@ -597,3 +597,56 @@ export async function closeConversationSessionByTicket(ticketId) {
     return false;
   }
 }
+
+// ====================== SAVE RAW INTAKE MESSAGE ======================
+/**
+ * Menyimpan pesan mentah (raw) dari WhatsApp atau channel lain ke tabel raw_intake_messages.
+ * Pesan disimpan dengan status 'pending' dan akan diproses AI secara asinkron/batch.
+ *
+ * @param {Object} data
+ * @param {string} data.message_id   - ID pesan unik dari WhatsApp
+ * @param {string} data.source       - 'whatsapp' | 'telegram_personal' | dst
+ * @param {string} data.sender_name  - Nama pengirim
+ * @param {string} data.sender_phone - Nomor HP pengirim (jika ada)
+ * @param {string} data.sender_id    - ID pengirim di platform-nya
+ * @param {string} data.message_text - Isi pesan mentah
+ * @param {string} data.group_id     - ID grup WhatsApp (JID)
+ * @param {string} data.group_name   - Nama grup WhatsApp
+ * @param {Date|string} data.wa_timestamp - Waktu pesan dikirim
+ * @returns {Object|null} data yang disimpan, atau null jika gagal
+ */
+export async function saveRawIntakeMessage(data) {
+  try {
+    const payload = {
+      message_id:   data.message_id   || null,
+      source:       data.source       || 'whatsapp',
+      sender_name:  data.sender_name  || null,
+      sender_phone: data.sender_phone || null,
+      sender_id:    data.sender_id    || null,
+      message_text: data.message_text || null,
+      group_id:     data.group_id     || null,
+      group_name:   data.group_name   || null,
+      wa_timestamp: data.wa_timestamp || new Date().toISOString(),
+      status:       'pending',
+    };
+
+    const { data: inserted, error } = await supabase
+      .from('raw_intake_messages')
+      .insert([payload])
+      .select('id, source, sender_name, group_name')
+      .single();
+
+    if (error) {
+      console.error('❌ Gagal menyimpan raw intake message:', error.message);
+      return null;
+    }
+
+    console.log(`   💾 Raw message tersimpan ke raw_intake_messages (id: ${inserted?.id})`);
+    return inserted;
+
+  } catch (err) {
+    console.error('❌ Unexpected error in saveRawIntakeMessage:', err.message);
+    return null;
+  }
+}
+
