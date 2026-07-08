@@ -58,6 +58,9 @@ function isLowPriority(priority = "") {
 }
 
 function getGroupSubject(remoteJid) {
+  if (!isGroup(remoteJid)) {
+    return "Private Chat";
+  }
   const metadata = groupCache.get(remoteJid);
   return metadata?.subject?.trim() || "Unknown WhatsApp Group";
 }
@@ -185,7 +188,11 @@ export async function connectWhatsApp() {
       if (!msg?.message || msg.key.fromMe) return;
 
       const remoteJid = msg.key.remoteJid || "";
-      if (!isGroup(remoteJid) || !ALLOWED_GROUPS.has(remoteJid)) return;
+      const isGrp = isGroup(remoteJid);
+      
+      // Jika pesan berasal dari grup, pastikan grup tersebut terdaftar di ALLOWED_GROUPS.
+      // Jika pesan berasal dari chat pribadi (PC/Japri), izinkan langsung lewat untuk disimpan ke raw data.
+      if (isGrp && !ALLOWED_GROUPS.has(remoteJid)) return;
 
       const senderName = msg.pushName || "Unknown User";
       const text = extractMessageText(msg);
