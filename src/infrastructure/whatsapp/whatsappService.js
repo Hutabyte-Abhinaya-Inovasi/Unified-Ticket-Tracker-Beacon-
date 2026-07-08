@@ -98,40 +98,25 @@ ${pseudoEmail.body}
 }
 
 /**
- * Kirim QR code ke Telegram sebagai GAMBAR PNG agar bisa di-scan langsung dari HP.
+ * Kirim QR code ke Telegram sebagai teks/gambar agar bisa di-scan dari Railway.
  * @param {string} qr - QR code string dari Baileys
  */
 async function sendQRToTelegram(qr) {
   try {
     const TelegramBot = (await import("node-telegram-bot-api")).default;
-    const QRCode = (await import("qrcode")).default;
     const token = process.env.TG_TOKEN;
     const chatId = process.env.TG_CHAT_ID;
     if (!token || !chatId) return;
 
     const bot = new TelegramBot(token);
-
-    // Generate QR sebagai Buffer PNG
-    const qrBuffer = await QRCode.toBuffer(qr, {
-      type: "png",
-      width: 512,
-      margin: 2,
-      color: { dark: "#000000", light: "#ffffff" },
-    });
-
-    // Kirim sebagai foto agar bisa langsung di-scan dengan kamera HP
-    await bot.sendPhoto(chatId, qrBuffer, {
-      caption:
-        "📱 *Scan QR ini dengan WhatsApp!*\n\n" +
-        "1\\. Buka WhatsApp di HP\n" +
-        "2\\. Klik ⋮ *Menu* → *Perangkat Tertaut*\n" +
-        "3\\. Klik *Tautkan Perangkat*\n" +
-        "4\\. Arahkan kamera ke foto ini\n\n" +
-        "⚠️ QR kedaluwarsa dalam ~60 detik\\. Jika gagal, restart Railway service\\.",
-      parse_mode: "MarkdownV2",
-    });
-
-    console.log("📤 QR code (gambar) berhasil dikirim ke Telegram!");
+    await bot.sendMessage(
+      chatId,
+      `🔗 *WhatsApp QR Code diperlukan!*\n\nAplikasi berjalan di Railway dan memerlukan autentikasi ulang WhatsApp.\n\n` +
+      `Salin kode QR berikut ke situs https://wa-qr.netlify.app atau aplikasi QR reader:\n\n` +
+      `\`${qr}\``,
+      { parse_mode: "Markdown" }
+    );
+    console.log("📤 QR code dikirim ke Telegram!");
   } catch (err) {
     console.error("⚠️ Gagal kirim QR ke Telegram:", err.message);
   }
