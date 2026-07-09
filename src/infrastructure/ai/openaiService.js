@@ -597,6 +597,5 @@ export {
   checkMessageRelevance,
   routeMessageToActiveTickets,
   detectStatusChangeFromReply,
-  extractTicketFields,
-  isSmallTalk
+  extractTicketFields
 };
