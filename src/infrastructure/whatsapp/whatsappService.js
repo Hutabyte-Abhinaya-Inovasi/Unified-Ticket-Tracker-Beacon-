@@ -7,26 +7,40 @@ import {
   DisconnectReason
 } from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
-import { analyzeEmail, checkMessageRelevance, routeMessageToActiveTickets, detectStatusChangeFromReply } from "../ai/openaiService.js";
-import { sendIncidentAlert, initTelegramBot, updateIncidentStatusAndMessage } from "../telegram/telegramService.js";
-import { saveEmailLog, generateTicketId, findActiveTicketForThreading, findActiveTicketsForGroup, appendMessageToTicket, createConversationSession, updateConversationLastMessage, supabase, saveRawIntakeMessage } from "../../database/supabase.js";
+import { saveRawIntakeMessage, supabase } from "../../database/supabase.js";
 import { useSupabaseAuthState } from "./supabaseAuthState.js";
+import { processRawMessage } from "../../usecases/processRawMessage.js";
 
 const AUTH_FOLDER = "./auth_info";
 
 const groupCache = new Map();
 
-const ALLOWED_GROUPS = new Set([
-  "120363021244940257@g.us",
-  "628111188176-1519023923@g.us",
-  "628118821733-1553603674@g.us",
-  "628118501322-1540806627@g.us",
-  "628118820105-1549007507@g.us",
-]);
+// ─── Grup yang dimonitor ──────────────────────────────────────────────────────
+// Baca dari env variable ALLOWED_WHATSAPP_GROUPS (koma-separated)
+// Fallback ke hardcoded jika env belum diisi
+const ALLOWED_GROUPS = new Set(
+  (process.env.ALLOWED_WHATSAPP_GROUPS || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean)
+);
+
+if (ALLOWED_GROUPS.size === 0) {
+  [
+    "120363021244940257@g.us",
+    "628111188176-1519023923@g.us",
+    "628118821733-1553603674@g.us",
+    "628118501322-1540806627@g.us",
+    "628118820105-1549007507@g.us",
+  ].forEach(id => ALLOWED_GROUPS.add(id));
+  console.warn("⚠️  ALLOWED_WHATSAPP_GROUPS tidak diset di .env, menggunakan fallback hardcoded.");
+}
 
 console.log(`📋 ALLOWED_GROUPS loaded: ${ALLOWED_GROUPS.size} group(s)`);
 
 let sock = null;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function extractMessageText(msg) {
   const message = msg.message;
@@ -49,56 +63,13 @@ function isGroup(remoteJid = "") {
   return remoteJid.endsWith("@g.us");
 }
 
-function normalizePriority(priority = "") {
-  return String(priority).trim().toUpperCase();
-}
-
-function isLowPriority(priority = "") {
-  return normalizePriority(priority) === "LOW";
-}
-
 function getGroupSubject(remoteJid) {
-  if (!isGroup(remoteJid)) {
-    return "Private Chat";
-  }
+  if (!isGroup(remoteJid)) return "Private Chat";
   const metadata = groupCache.get(remoteJid);
   return metadata?.subject?.trim() || "Unknown WhatsApp Group";
 }
 
-/**
- * Membuat format pesan Ticket yang formal dan rapi
- */
-function createFormalTicket(pseudoEmail, analysis) {
-  const now = new Date();
-  const tanggal = now.toLocaleDateString("id-ID", {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric"
-  });
-  const waktu = now.toLocaleTimeString("id-ID", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    timeZone: "Asia/Jakarta"
-  });
-
-  const priority = analysis?.priority?.toUpperCase() || "MEDIUM";
-
-  return `PESAN BARU DARI WHATSAPP
-
-Ticket ID     : ${pseudoEmail.id}
-Tanggal       : ${tanggal}
-Waktu         : ${waktu} WIB
-
-From          : ${pseudoEmail.from}
-Group         : ${pseudoEmail.group_name}
-
-Isi Pesan:
-${pseudoEmail.body}
-
-────────────────────────────────────`;
-}
+// ─── Connect ──────────────────────────────────────────────────────────────────
 
 export async function connectWhatsApp() {
   if (sock) return sock;
@@ -128,6 +99,7 @@ export async function connectWhatsApp() {
 
   sock.ev.on("creds.update", saveCreds);
 
+  // ── Connection state ───────────────────────────────────────────────────────
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
@@ -169,6 +141,7 @@ export async function connectWhatsApp() {
     }
   });
 
+  // ── Group metadata cache update ────────────────────────────────────────────
   sock.ev.on("groups.update", (updates) => {
     for (const update of updates) {
       if (update.id && update.subject !== undefined) {
@@ -179,6 +152,7 @@ export async function connectWhatsApp() {
     }
   });
 
+  // ── Incoming messages ──────────────────────────────────────────────────────
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     try {
       if (type !== "notify") return;
@@ -189,14 +163,12 @@ export async function connectWhatsApp() {
 
       const remoteJid = msg.key.remoteJid || "";
       const isGrp = isGroup(remoteJid);
-      
-      // Jika pesan berasal dari grup, pastikan grup tersebut terdaftar di ALLOWED_GROUPS.
-      // Jika pesan berasal dari chat pribadi (PC/Japri), izinkan langsung lewat untuk disimpan ke raw data.
+
+      // Grup harus terdaftar di ALLOWED_GROUPS; pesan DM (japri) selalu lolos
       if (isGrp && !ALLOWED_GROUPS.has(remoteJid)) return;
 
       const senderName = msg.pushName || "Unknown User";
       const text = extractMessageText(msg);
-
       if (!text) return;
 
       console.log("\n📩 WhatsApp Message Received");
@@ -204,141 +176,57 @@ export async function connectWhatsApp() {
       console.log(`From  : ${senderName}`);
       console.log(`Text  : ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`);
 
-      // === STEP 0: SIMPAN PESAN MENTAH KE raw_intake_messages ===
-      // Ini terjadi untuk SETIAP pesan yang masuk, sebelum diproses AI apapun.
-      await saveRawIntakeMessage({
-        message_id:   msg.key.id,
-        source:       'whatsapp',
-        sender_name:  senderName,
-        sender_phone: null,  // WhatsApp tidak selalu expose nomor HP
-        sender_id:    msg.key.participant || msg.key.remoteJid,
-        message_text: text,
-        group_id:     remoteJid,
-        group_name:   getGroupSubject(remoteJid),
-        wa_timestamp: msg.messageTimestamp
-          ? new Date(Number(msg.messageTimestamp) * 1000).toISOString()
-          : new Date().toISOString(),
-      }).catch(err => console.warn('⚠️ Gagal simpan raw message, proses tetap lanjut:', err.message));
+      // Ambil quoted message ID (untuk thread_ref)
+      const quotedStanzaId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId || null;
+      const participantId  = msg.key.participant || msg.key.remoteJid;
 
-      const quotedStanzaId = msg.message.extendedTextMessage?.contextInfo?.stanzaId || null;
-      const groupSubject = getGroupSubject(remoteJid);
-
-      let parentTicket = null;
-
-      // 1. Jika me-reply pesan lama secara langsung (quote)
-      if (quotedStanzaId) {
-        parentTicket = await findActiveTicketForThreading(remoteJid, groupSubject, quotedStanzaId, 'whatsapp');
-      } else {
-        // 2. Jika pesan biasa, ambil semua tiket yang sedang aktif di grup ini
-        const activeTickets = await findActiveTicketsForGroup(remoteJid, 'whatsapp');
-        
-        if (activeTickets.length === 1) {
-          // Jika hanya ada 1 tiket aktif, lakukan pencocokan relevansi standar
-          const isShort = text.length < 20;
-          const replyKeywords = ["baik", "oke", "ok", "siap", "tenggat", "kapan", "aman", "done", "proses", "sudah", "terima kasih", "thanks", "tolong", "perbaiki", "yah", "ini"];
-          const hasReplyKeyword = replyKeywords.some(k => text.toLowerCase().trim() === k);
-
-          if (isShort && hasReplyKeyword) {
-            parentTicket = activeTickets[0];
-          } else {
-            const isRelated = await checkMessageRelevance(text, activeTickets[0].body, activeTickets[0].summary);
-            if (isRelated) {
-              parentTicket = activeTickets[0];
-            }
-          }
-        } else if (activeTickets.length > 1) {
-          // Jika ada beberapa tiket aktif sekaligus, gunakan AI routing
-          const isShort = text.length < 20;
-          const replyKeywords = ["baik", "oke", "ok", "siap", "tenggat", "kapan", "aman", "done", "proses", "sudah", "terima kasih", "thanks", "tolong", "perbaiki", "yah", "ini"];
-          const hasReplyKeyword = replyKeywords.some(k => text.toLowerCase().trim() === k);
-
-          if (isShort && hasReplyKeyword) {
-            // Sebagai heuristik, hubungkan ke tiket aktif paling terakhir diperbarui
-            parentTicket = activeTickets[0];
-          } else {
-            const matchedTicketId = await routeMessageToActiveTickets(text, activeTickets);
-            if (matchedTicketId) {
-              parentTicket = activeTickets.find(t => t.ticket_id === matchedTicketId) || null;
-            }
-          }
-        }
-      }
-
-      if (parentTicket) {
-        console.log(`💬 Threading: Menambahkan balasan dari ${senderName} ke tiket aktif ${parentTicket.ticket_id}`);
-        
-        // 1. Simpan/append ke body di database
-        await appendMessageToTicket(parentTicket.ticket_id, parentTicket.body, senderName, text);
-
-        // Update data sesi conversation agar menunjuk ke tiket ini
-        await createConversationSession('whatsapp', remoteJid, parentTicket.ticket_id, text, parentTicket.summary);
-
-        // 2. Teruskan balasan ke Telegram (reply ke alert sebelumnya)
-        if (parentTicket.telegram_chat_id && parentTicket.telegram_message_id) {
-          try {
-            const targetChatId = parentTicket.telegram_chat_id.split('|')[0];
-            const botInstance = initTelegramBot();
-            const replyText = `💬 <b>Balasan dari ${senderName} (Ticket ${parentTicket.ticket_id})</b>:\n\n${text}`;
-            await botInstance.sendMessage(targetChatId, replyText, {
-              parse_mode: "HTML",
-              reply_to_message_id: parseInt(parentTicket.telegram_message_id, 10)
-            });
-            console.log(`✅ Balasan berhasil diteruskan ke Telegram (reply_to_message_id: ${parentTicket.telegram_message_id})`);
-          } catch (tgErr) {
-            console.error("⚠️ Gagal meneruskan balasan ke Telegram:", tgErr.message);
-          }
-        }
-
-        // 3. Cek apakah balasan ini menyatakan perubahan status (Done, Escalated, Cancelled)
-        try {
-          const detectedStatus = await detectStatusChangeFromReply(text);
-          if (detectedStatus && detectedStatus !== 'no_change') {
-            await updateIncidentStatusAndMessage(parentTicket.ticket_id, detectedStatus, true);
-          }
-        } catch (statusErr) {
-          console.error("⚠️ Gagal memproses deteksi status otomatis dari balasan WhatsApp:", statusErr.message);
-        }
-
-        return; // Hentikan alur, jangan buat tiket baru!
-      }
-
-      // === STEP 0: Update ticket_id di raw_intake_messages setelah tiket dibuat ===
-      const ticketId = await generateTicketId();
-
-      const pseudoEmail = {
-        id: ticketId,             // Digunakan sebagai fallback/ticket_id
-        ticket_id: ticketId,      // Ticket ID resmi
-        messageId: msg.key.id,    // WhatsApp message ID yang sebenarnya
-        from: senderName,
-        subject: groupSubject,
-        body: text,
-        source: "whatsapp",
-        group_id: remoteJid,
-        group_name: groupSubject,
-        timestamp: new Date().toISOString()
-      };
-
-      const analysis = await analyzeEmail(pseudoEmail);
-
-      if (isLowPriority(analysis?.priority)) {
-        console.log("🟢 Priority LOW detected -> skipped");
-        return;
-      }
-
-      // Buat pesan formal
-      const formalMessage = createFormalTicket(pseudoEmail, analysis);
-
-      // Kirim ke Telegram (ini sudah otomatis menyimpan ke database di dalamnya)
-      const tg = await sendIncidentAlert({
-        ...pseudoEmail,
-        formalMessage,
-        analysis
+      // ── STEP 1: Simpan pesan mentah ke intake_message ──────────────
+      // Terjadi untuk SETIAP pesan sebelum diproses AI apapun.
+      const raw = await saveRawIntakeMessage({
+        source_channel:  isGrp ? 'wa_group' : 'wa_dm',
+        source_ref:      remoteJid,
+        sender:          participantId
+                           ? `${senderName} (${participantId})`
+                           : senderName,
+        thread_ref:      quotedStanzaId,                  // ← ID pesan yang di-quote
+        received_at:     msg.messageTimestamp
+                           ? new Date(Number(msg.messageTimestamp) * 1000).toISOString()
+                           : new Date().toISOString(),
+        body_text:       text,
+        attachments:     null,                            // TODO: tangkap media jika ada
+        raw_payload:     {
+          group_name:      getGroupSubject(remoteJid),
+          wa_message_id:   msg.key.id,
+          participant_id:  participantId,
+          push_name:       senderName,
+        },
+        idempotency_key: msg.key.id,                      // ← WA message ID, unik per pesan
+      }).catch(err => {
+        console.warn('⚠️ Gagal simpan raw message, proses tetap lanjut:', err.message);
+        return null;
       });
 
-      console.log(`✅ Ticket ${ticketId} successfully created and forwarded to Telegram (Msg ID: ${tg?.telegramMessageId || 'N/A'})`);
 
-      // Buat sesi conversation baru di database
-      await createConversationSession('whatsapp', remoteJid, ticketId, text, analysis?.summary || null);
+      // ── STEP 2: Proses raw message (deteksi threading + tiket) ──────────
+      // Seluruh logika (small talk, AI relevance, duplikat, tiket baru) ada
+      // di processRawMessage.js — whatsappService cukup simpan raw lalu lempar ke sana.
+      if (raw?.id) {
+        await processRawMessage(raw);
+      } else {
+        // raw save gagal → buat objek manual agar tetap bisa diproses
+        await processRawMessage({
+          id:              null,
+          source_channel:  isGrp ? 'wa_group' : 'wa_dm',
+          source_ref:      remoteJid,
+          sender:          participantId ? `${senderName} (${participantId})` : senderName,
+          body_text:       text,
+          raw_payload:     {
+            group_name:      getGroupSubject(remoteJid),
+            wa_message_id:   msg.key.id,
+          },
+          idempotency_key: msg.key.id,
+        });
+      }
 
     } catch (err) {
       console.error("❌ Error processing WhatsApp:", err.message);

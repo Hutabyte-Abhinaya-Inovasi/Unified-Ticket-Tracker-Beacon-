@@ -4,6 +4,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import { env } from '../../config/env.js';
 import {
   saveEmailLog,
+  saveRawIntakeMessage,
   updateIncidentStatus,
   getTicketsByStatus,
   getTicketsByDateRange,
@@ -154,113 +155,51 @@ function initTelegramBot() {
       return;
     }
 
-    // ── PRIORITAS 2: Monitored intake group → simpan langsung ke Supabase ──
+    // ── PRIORITAS 2: Monitored intake group → simpan raw ke intake_message lalu proses ──
     if (isMonitoredGroup) {
       console.log(`\n📩 Telegram Message Received`);
       console.log(`Group  : ${groupName} (${chatId})`);
       console.log(`From   : ${sender}`);
       console.log(`Text   : ${msg.text.substring(0, 100)}${msg.text.length > 100 ? '...' : ''}`);
 
-      const quotedMessageId = msg.reply_to_message ? msg.reply_to_message.message_id.toString() : null;
-      const groupSubject = `Laporan dari ${groupName}`;
+      // Simpan ke tabel intake_message terlebih dahulu
+      const raw = await saveRawIntakeMessage({
+        source_channel:  'telegram',
+        source_ref:      chatId.toString(),
+        sender:          `${sender} (${userId})`,
+        thread_ref:      msg.reply_to_message?.message_id ? `tg_grp_${msg.reply_to_message.message_id}` : null,
+        received_at:     new Date(Number(msg.date || Date.now() / 1000) * 1000).toISOString(),
+        body_text:       msg.text,
+        attachments:     null,
+        raw_payload:     {
+          group_name:      groupName,
+          telegram_msg_id: msg.message_id,
+          sender_id:       userId,
+          push_name:       sender,
+        },
+        idempotency_key: `tg_grp_${msg.message_id}`,
+      }).catch(err => {
+        console.warn('⚠️ Gagal simpan raw message Telegram group, proses tetap lanjut:', err.message);
+        return null;
+      });
 
-      let parentTicket = null;
+      // Import processRawMessage secara lazy (hindari circular dependency)
+      const { processRawMessage } = await import('../../usecases/processRawMessage.js');
 
-      // 1. Jika me-reply pesan lama secara langsung (quote)
-      if (quotedMessageId) {
-        parentTicket = await findActiveTicketForThreading(chatId, groupSubject, quotedMessageId, 'telegram_group');
-      } else {
-        // 2. Jika pesan biasa, ambil semua tiket yang sedang aktif di grup ini
-        const activeTickets = await findActiveTicketsForGroup(chatId, 'telegram_group');
-
-        if (activeTickets.length === 1) {
-          // Jika hanya ada 1 tiket aktif, lakukan pencocokan relevansi standar
-          const isShort = msg.text.length < 20;
-          const replyKeywords = ["baik", "oke", "ok", "siap", "tenggat", "kapan", "aman", "done", "proses", "sudah", "terima kasih", "thanks", "tolong", "perbaiki", "yah", "ini"];
-          const hasReplyKeyword = replyKeywords.some(k => msg.text.toLowerCase().trim() === k);
-
-          if (isShort && hasReplyKeyword) {
-            parentTicket = activeTickets[0];
-          } else {
-            const isRelated = await checkMessageRelevance(msg.text, activeTickets[0].body, activeTickets[0].summary);
-            if (isRelated) {
-              parentTicket = activeTickets[0];
-            }
-          }
-        } else if (activeTickets.length > 1) {
-          // Jika ada beberapa tiket aktif sekaligus, gunakan AI routing
-          const isShort = msg.text.length < 20;
-          const replyKeywords = ["baik", "oke", "ok", "siap", "tenggat", "kapan", "aman", "done", "proses", "sudah", "terima kasih", "thanks", "tolong", "perbaiki", "yah", "ini"];
-          const hasReplyKeyword = replyKeywords.some(k => msg.text.toLowerCase().trim() === k);
-
-          if (isShort && hasReplyKeyword) {
-            // Sebagai heuristik, hubungkan ke tiket aktif paling terakhir diperbarui
-            parentTicket = activeTickets[0];
-          } else {
-            const matchedTicketId = await routeMessageToActiveTickets(msg.text, activeTickets);
-            if (matchedTicketId) {
-              parentTicket = activeTickets.find(t => t.ticket_id === matchedTicketId) || null;
-            }
-          }
-        }
-      }
-
-      if (parentTicket) {
-        console.log(`💬 Threading Telegram: Menambahkan balasan dari ${sender} ke tiket aktif ${parentTicket.ticket_id}`);
-        
-        // 1. Simpan/append ke body di database
-        await appendMessageToTicket(parentTicket.ticket_id, parentTicket.body, sender, msg.text);
-
-        // Update data sesi conversation agar menunjuk ke tiket ini
-        await createConversationSession('telegram_group', chatId, parentTicket.ticket_id, msg.text, parentTicket.summary);
-
-        // 2. Teruskan balasan ke Telegram utama (reply ke alert sebelumnya)
-        if (parentTicket.telegram_chat_id && parentTicket.telegram_message_id) {
-          try {
-            const targetChatId = parentTicket.telegram_chat_id.split('|')[0];
-            const replyText = `💬 <b>Balasan dari ${sender} (Telegram Group - Ticket ${parentTicket.ticket_id})</b>:\n\n${msg.text}`;
-            await bot.sendMessage(targetChatId, replyText, {
-              parse_mode: "HTML",
-              reply_to_message_id: parseInt(parentTicket.telegram_message_id, 10)
-            });
-            console.log(`✅ Balasan berhasil diteruskan ke Telegram Utama (reply_to_message_id: ${parentTicket.telegram_message_id})`);
-          } catch (tgErr) {
-            console.error("⚠️ Gagal meneruskan balasan ke Telegram Utama:", tgErr.message);
-          }
-        }
-
-        // 3. Cek apakah balasan ini menyatakan perubahan status (Done, Escalated, Cancelled)
-        try {
-          const detectedStatus = await detectStatusChangeFromReply(msg.text);
-          if (detectedStatus && detectedStatus !== 'no_change') {
-            await updateIncidentStatusAndMessage(parentTicket.ticket_id, detectedStatus, true);
-          }
-        } catch (statusErr) {
-          console.error("⚠️ Gagal memproses deteksi status otomatis dari balasan Telegram:", statusErr.message);
-        }
-
-        return; // Hentikan alur, jangan buat tiket baru!
-      }
-
-      // === BUKAN FOLLOW-UP: BUAT TIKET BARU ===
-      const ticketId = await generateTicketId();
-      const pseudoEmail = {
-        id: ticketId,
-        messageId: msg.message_id.toString(), // Actual Telegram message ID
-        from: `${sender}`,
-        subject: `Laporan dari ${groupName}`,
-        body: msg.text,
-        source: "telegram_group",
-        group_name: groupName,
-        group_id: chatId
-      };
-
-      const analysis = await analyzeEmail(pseudoEmail);
-
-      await sendIncidentAlert(pseudoEmail, analysis);
-
-      // Buat sesi conversation baru di database
-      await createConversationSession('telegram_group', chatId, pseudoEmail.id, msg.text, analysis?.summary || null);
+      // Proses melalui pipeline utama
+      await processRawMessage({
+        ...(raw || {}),
+        id:              raw?.id || null,
+        source_channel:  'telegram',
+        source_ref:      chatId.toString(),
+        sender:          `${sender} (${userId})`,
+        body_text:       msg.text,
+        raw_payload:     {
+          group_name:      groupName,
+          telegram_msg_id: msg.message_id,
+        },
+        idempotency_key: `tg_grp_${msg.message_id}`,
+      });
       return;
     }
 

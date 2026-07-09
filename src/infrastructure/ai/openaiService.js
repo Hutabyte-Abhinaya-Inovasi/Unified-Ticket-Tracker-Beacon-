@@ -385,7 +385,7 @@ ${rawText}
   }
 }
 
-function isSmallTalk(text) {
+export function isSmallTalk(text) {
   const trimmed = text.trim();
   if (!trimmed) return true;
   
@@ -597,5 +597,6 @@ export {
   checkMessageRelevance,
   routeMessageToActiveTickets,
   detectStatusChangeFromReply,
-  extractTicketFields
+  extractTicketFields,
+  isSmallTalk
 };
