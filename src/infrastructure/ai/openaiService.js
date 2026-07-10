@@ -6,6 +6,7 @@ import {
   updateTicket, 
   deleteTicket 
 } from "../../database/supabase.js";
+import { supabase } from "../../database/supabase.js";
 
 const isGemini = !!env.GEMINI_API_KEY;
 
@@ -13,7 +14,7 @@ const client = new OpenAI({
   apiKey: env.GEMINI_API_KEY || env.OPENAI_API_KEY,
   baseURL: isGemini ? "https://generativelanguage.googleapis.com/v1beta/openai/" : undefined,
 });
-
+// Model untuk chat completion
 const AI_MODEL = isGemini ? "gemini-2.5-flash" : "gpt-4o-mini";
 
 const MAX_RETRY = 5;
@@ -111,18 +112,63 @@ async function callOpenAIChatCompletion(options) {
     }
   }
 }
+async function getActiveTickets() {
+    const { data, error } = await supabase
+        .from("Unified_Ticket_Tracker")
+        .select("*")
+        .eq("status", "In Progress");
 
+    if (error) {
+        console.error(error);
+        return [];
+    }
+
+    return data;
+}
 // ==================== CHAT WITH AI ====================
-async function chatWithAI(text, context = "") {
+async function chatWithAI(userInput, context = "") {
+  // ─── LANGKAH RAG: RETRIEVAL ───
+  let retrievedContext = "";
+  try {
+    // 1. Buat embedding dari pertanyaan user
+    const queryEmbedding = await createEmbedding(userInput);
+
+    if (queryEmbedding) {
+      // 2. Cari dokumen relevan di Supabase
+      const { data: documents, error } = await supabase.rpc('match_documents', {
+        query_embedding: queryEmbedding,
+        match_threshold: 0.75, // Tingkat kemiripan minimum
+        match_count: 3         // Ambil 3 dokumen teratas
+      });
+
+      if (error) {
+        console.error("❌ RAG search error:", error.message);
+      } else if (documents && documents.length > 0) {
+        console.log(`📚 RAG: Ditemukan ${documents.length} dokumen relevan.`);
+        retrievedContext = "Berikut adalah beberapa konteks dari knowledge base yang mungkin relevan:\n\n" +
+          documents.map(doc => `--- Dokumen: ${doc.title} ---\n${doc.content}`).join("\n\n");
+      }
+    }
+  } catch (ragError) {
+    console.error("❌ Kesalahan pada proses RAG:", ragError.message);
+  }
+
+  // ─── LANGKAH AUGMENTATION & GENERATION ───
   let messages = [
     {
       role: "system",
-      content: `Kamu adalah asisten ITSM yang cerdas, sopan, dan membantu tim teknis.
+      content: `Kamu adalah asisten ITSM "Beacon" yang cerdas, sopan, dan sangat membantu tim teknis.
 Gunakan bahasa Indonesia yang profesional.
-Kamu memiliki kemampuan untuk melihat, mengupdate, dan menghapus ticket menggunakan tools yang tersedia.
-Jika user meminta update/hapus/tampilkan ticket, gunakan tool yang sesuai.`
+
+Tugas utama kamu adalah menjawab pertanyaan pengguna dan meberikan langkah langkah penyelesaian.
+Jika tersedia konteks dari knowledge base, gunakan informasi tersebut untuk memberikan jawaban yang lebih akurat dan relevan.
+Jika tidak ada konteks atau konteks tidak relevan, jawab pertanyaan sebaik mungkin berdasarkan pengetahuan umummu.
+
+Kamu juga memiliki kemampuan untuk melihat, mengupdate, dan menghapus ticket menggunakan tools yang tersedia. Jika user meminta tindakan terkait tiket, gunakan tool yang sesuai.
+
+${retrievedContext}` // Konteks dari RAG disisipkan di sini
     },
-    { role: "user", content: text + context }
+    { role: "user", content: userInput + context }
   ];
 
   let attempt = 0;
@@ -165,6 +211,33 @@ Jika user meminta update/hapus/tampilkan ticket, gunakan tool yang sesuai.`
       }
     }
   }
+}
+
+// Fungsi baru untuk membuat embedding
+async function createEmbedding(text) {
+  // Pastikan teks tidak kosong dan bersihkan
+  const cleanText = text.replace(/\n/g, ' ');
+  try {
+    const response = await client.embeddings.create({
+      model: 'text-embedding-3-small', // Model embedding dari OpenAI
+      input: cleanText,
+      dimensions: 1536 // Sesuaikan dengan ukuran di tabel Supabase
+    });
+    return response.data[0].embedding;
+  } catch (err) {
+    console.error("❌ Gagal membuat embedding:", err.message);
+    return null;
+  }
+}
+
+// Fungsi baru untuk mengindeks sebuah dokumen (bisa dipanggil dari skrip terpisah)
+export async function indexDocument(title, content, source = 'manual') {
+  console.log(`📚 Mengindeks dokumen: "${title}"`);
+  const embedding = await createEmbedding(content);
+  if (!embedding) return;
+  const { error } = await supabase.from('knowledge_base').insert({ title, content, source, embedding });
+  if (error) console.error(`❌ Gagal menyimpan indeks:`, error.message);
+  else console.log(`   ✅ Dokumen berhasil diindeks.`);
 }
 
 // ==================== ANALYZE EMAIL (untuk WhatsApp) ====================
@@ -264,9 +337,22 @@ ${safeBody}
   } catch (err) {
     if (err instanceof SyntaxError) {
       console.warn("❌ JSON parse error dari AI");
+      console.warn("❌ JSON parse error dari AI. Menganggap tidak relevan.", text);
     } else {
       console.error("OpenAI Error:", err.message);
     }
+    // Fallback jika AI gagal: anggap tidak relevan agar tidak membuat tiket yang salah.
+    return {
+      shouldProcess: false,
+      isRelevant: false,
+      confidence_score: 0,
+      reason: "ai_parsing_failed",
+      original_message: email.body,
+      subject: email.subject,
+      category: ruleResult.category,
+      priority: ruleResult.priority,
+      response: null,
+    };
   }
 
   return {
@@ -318,7 +404,7 @@ ${rawText}
 
   try {
     const response = await client.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: AI_MODEL,
       messages: [
         {
           role: "system",
@@ -550,6 +636,8 @@ Keluarkan hasil analisis dalam format JSON valid berikut:
   }
 }
 
+
+
 async function detectStatusChangeFromReply(text) {
   try {
     const prompt = `Anda adalah asisten triase operasional IT.
@@ -592,10 +680,12 @@ Keluarkan hasil dalam format JSON valid berikut:
 }
 
 export { 
+  getActiveTickets,
   chatWithAI, 
   analyzeEmail,
   checkMessageRelevance,
   routeMessageToActiveTickets,
   detectStatusChangeFromReply,
   extractTicketFields
+  
 };
