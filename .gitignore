@@ -15,3 +15,7 @@ build/
 # Misc
 .DS_Store
 auth_info/
+
+# Gmail OAuth
+credentials.json
+token.json

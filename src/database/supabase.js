@@ -601,6 +601,57 @@ export async function closeConversationSessionByTicket(ticketId) {
   }
 }
 
+// ====================== SAVE RAW EMAIL ======================
+export async function saveRawEmail(email) {
+  try {
+
+    const payload = {
+      source_channel: "email",
+
+      source_ref: email.id,
+
+      sender: email.from,
+
+      thread_ref: email.threadId,
+
+      received_at: email.date
+        ? new Date(email.date).toISOString()
+        : new Date().toISOString(),
+
+      body_text: email.body,
+
+      attachments: {
+        count: email.attachmentCount
+      },
+
+      raw_payload: email,
+
+      idempotency_key: `email-${email.id}`,
+
+      status: "pending"
+    };
+
+    const { data, error } = await supabase
+      .from("intake_message")
+      .insert([payload])
+      .select()
+      .single();
+
+    if (error) {
+      console.error("❌ Gagal simpan email:", error.message);
+      return null;
+    }
+
+    console.log("✅ Email berhasil masuk intake_message:", data.id);
+
+    return data;
+
+  } catch (err) {
+    console.error(err);
+    return null;
+  }
+}
+
 // ====================== SAVE RAW INTAKE MESSAGE ======================
 /**
  * Menyimpan pesan mentah (raw) dari channel apapun ke tabel intake_message.

@@ -2,7 +2,7 @@
 import { getLatestEmail } from "../infrastructure/gmail/gmailService.js";
 import { sendIncidentAlert } from "../infrastructure/telegram/telegramService.js";
 import { analyzeEmail } from "../infrastructure/ai/openaiService.js";
-import { saveEmailLog } from "../database/supabase.js";
+import { saveEmailLog, saveRawEmail } from "../database/supabase.js";
 
 let lastEmailId = null;
 
@@ -31,13 +31,16 @@ export async function forwardUnreadEmail(auth) {
 
   // Cegah memproses email yang sama dua kali
   if (email.id === lastEmailId) {
-    console.log("⏩ Email sudah diproses, skip...");
+    //console.log("⏩ Email sudah diproses, skip...");
     return;
   }
   lastEmailId = email.id;
   email.source = "email";
 
   console.log("📩 EMAIL BARU:", email);
+  // Simpan dulu ke raw_intake_messages
+  await saveRawEmail(email);
+  return;
 
   // Analisis AI
   const analysis = await analyzeEmail(email);

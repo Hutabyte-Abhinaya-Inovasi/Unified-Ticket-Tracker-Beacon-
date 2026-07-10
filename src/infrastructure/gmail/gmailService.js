@@ -68,9 +68,15 @@ export async function getLatestEmail(auth) {
     format: "full"
   });
 
+  //console.log(msg.data);
+
   const headers = msg.data.payload.headers;
-  const from = headers.find(h => h.name === "From")?.value || "-";
+  const threadId = msg.data.threadId;
+  const from = headers.find(h=>h.name === "From")?.value || "-";
+  const to = headers.find(h=>h.name === "To")?.value || "-";
+  const cc = headers.find(h => h.name === "Cc")?.value || "-";
   const subject = headers.find(h => h.name === "Subject")?.value || "-";
+  const date = headers.find(h=> h.name === "Date")?.value || "";
 
   // Ambil body
   let body = extractBody(msg.data.payload);
@@ -82,11 +88,18 @@ export async function getLatestEmail(auth) {
     ignoreHref: true
   });
 
+  const attachmentCount = msg.data.payload.parts?.filter(part=>part.filename).length || 0;
+
   return {
     id: messageId,
+    threadId,
     from,
+    to,
+    cc,
     subject,
-    body
+    body,
+    date,
+    attachmentCount
   };
 }
 

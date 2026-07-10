@@ -7,6 +7,9 @@ import { connectWhatsApp } from "./infrastructure/whatsapp/whatsappService.js";
 import { initTelegramBot } from "./infrastructure/telegram/telegramService.js";
 import { startTelegramUserListener } from "./infrastructure/telegram/telegramUserListener.js";
 import { startOutlookListener } from "./infrastructure/outlook/outlookService.js"; 
+// import { authorize } from "./config/gmailAuth.js";
+// import { forwardUnreadEmail } from "./usecases/forwardUnreadEmail.js";
+import { startGmailListener } from "./infrastructure/gmail/gmailListener.js";
 
 console.log("🚀 Unified Incident Intake System");
 console.log("=====================================");
@@ -16,6 +19,14 @@ let telegramUserClient = null;
 
 async function start() {
   try {
+
+    // console.log("📧 Testing Gmail...");
+    // const auth = await authorize();
+    // await forwardUnreadEmail(auth);
+    // console.log("✅ Gmail berhasil dicek.");
+
+    console.log("📧 Memulai Gmail Listener...");
+    await startGmailListener();
     console.log("🤖 Memulai Telegram Bot...");
     initTelegramBot();                    // ← PENTING: Ini harus dipanggil di awal
 
