@@ -471,27 +471,35 @@ ${rawText}
   }
 }
 
-function isSmallTalk(text) {
+export function isSmallTalk(text) {
   const trimmed = text.trim();
   if (!trimmed) return true;
-  
+
+  // 1. Cek apakah ada kata kunci keluhan/permintaan IT (jika ada, PASTI bukan small talk!)
+  const actionOrTechWords = /(perbaiki|benerin|rusak|error|mati|down|server|web|jaringan|wifi|lambat|lemot|gagal|gabisa|gak bisa|tidak bisa|bantu|tolong|cek|issue|bug|ticket|tiket|kendala|masalah|trouble|putus|absen|login|password)/i;
+  if (actionOrTechWords.test(trimmed)) {
+    return false;
+  }
+
+  // 2. Daftar pola sapaan atau jawaban pendek polos yang tidak mengandung keluhan
   const IRRELEVANT_PATTERNS = [
-    /^hai+$/i, /^halo+$/i, /^hi+$/i, /^hello+$/i,
-    /^terima kasih$/i, /^thanks$/i, /^thank you$/i,
-    /^sama-sama$/i, /^ok$/i, /^oke$/i, /^sip$/i, /^mantap$/i,
-    /^sudah$/i, /^done$/i, /^selesai$/i,
-    /^apa kabar?$/i, /^kabar$/i,
-    /^(ya|iya|betul|benar)$/i,
+    /^(hai+|halo+|hi+|hello+|pagi|siang|sore|malam)$/i,
+    /^(terima kasih|thanks|thank you|makasih|tq|thx)$/i,
+    /^(sama-sama|ok|oke|sip|mantap|siap|baik)$/i,
+    /^(sudah|done|selesai|beres)$/i,
+    /^(apa kabar\??|kabar)$/i,
+    /^(ya|iya|betul|benar|nggak|tidak)$/i,
   ];
 
   for (const pattern of IRRELEVANT_PATTERNS) {
     if (pattern.test(trimmed)) return true;
   }
 
-  if (trimmed.length < 15) {
-    const technicalWords = /(server|error|login|password|down|lambat|issue|bug|ticket|tiket)/i;
-    if (!technicalWords.test(trimmed)) return true;
+  // 3. Jika pesan sangat pendek (< 10 karakter) dan tidak ada kata teknis/keluhan
+  if (trimmed.length < 10) {
+    return true;
   }
+
   return false;
 }
 

@@ -78,6 +78,7 @@ export async function saveEmailLog(email, analysis = {}, telegramSent = false, t
       category: analysis.category || "Incident Management",
       priority: analysis.priority || "MEDIUM",
       source: email.source || "whatsapp",
+      group_id: email.group_id || null,
       telegram_sent: telegramSent,
       telegram_message_id: telegramMessageId,
       telegram_chat_id: telegramChatId,
@@ -85,6 +86,7 @@ export async function saveEmailLog(email, analysis = {}, telegramSent = false, t
         ? (analysis.confidence_score !== undefined && Number(analysis.confidence_score) < 80 ? "Pending Confirmation" : "In Progress")
         : "Logged (No Action)",
       processed_at: new Date().toISOString(),
+      last_message_at: new Date().toISOString(),
     };
 
     const { error } = await supabase
@@ -495,7 +497,8 @@ export async function appendMessageToTicket(ticketId, currentBody, senderName, t
       .from('Unified_Ticket_Tracker')
       .update({
         body: newBody,
-        updated_at: new Date().toISOString()
+        updated_at: new Date().toISOString(),
+        last_message_at: new Date().toISOString(),
       })
       .eq('ticket_id', ticketId);
 
@@ -600,48 +603,59 @@ export async function closeConversationSessionByTicket(ticketId) {
 
 // ====================== SAVE RAW INTAKE MESSAGE ======================
 /**
- * Menyimpan pesan mentah (raw) dari WhatsApp atau channel lain ke tabel raw_intake_messages.
- * Pesan disimpan dengan status 'pending' dan akan diproses AI secara asinkron/batch.
+ * Menyimpan pesan mentah (raw) dari channel apapun ke tabel intake_message.
+ * Dipanggil SEBELUM proses AI apapun — setiap pesan masuk selalu disimpan dulu.
  *
- * @param {Object} data
- * @param {string} data.message_id   - ID pesan unik dari WhatsApp
- * @param {string} data.source       - 'whatsapp' | 'telegram_personal' | dst
- * @param {string} data.sender_name  - Nama pengirim
- * @param {string} data.sender_phone - Nomor HP pengirim (jika ada)
- * @param {string} data.sender_id    - ID pengirim di platform-nya
- * @param {string} data.message_text - Isi pesan mentah
- * @param {string} data.group_id     - ID grup WhatsApp (JID)
- * @param {string} data.group_name   - Nama grup WhatsApp
- * @param {Date|string} data.wa_timestamp - Waktu pesan dikirim
- * @returns {Object|null} data yang disimpan, atau null jika gagal
+ * Skema kolom tabel intake_message:
+ * @param {Object}      data
+ * @param {string}      data.source_channel  - 'telegram' | 'teams' | 'email' | 'wa_dm' | 'wa_group'
+ * @param {string}      data.source_ref      - ID grup/chat/thread (WA JID, Telegram chat_id, email thread)
+ * @param {string}      data.sender          - Nama + ID pengirim, format: "Nama (platform_id)"
+ * @param {string}      [data.thread_ref]    - ID pesan yang di-quote/reply (untuk threading langsung)
+ * @param {string|Date} data.received_at     - Waktu pesan diterima (ISO string)
+ * @param {string}      data.body_text       - Isi pesan teks
+ * @param {Object}      [data.attachments]   - Metadata lampiran (opsional JSONB)
+ * @param {Object}      [data.raw_payload]   - Payload lengkap dari platform (group_name, dsb)
+ * @param {string}      data.idempotency_key - ID pesan unik dari platform (untuk cegah duplikat)
+ * @returns {Object|null} Row yang berhasil disimpan, atau null jika gagal
  */
 export async function saveRawIntakeMessage(data) {
   try {
+    // Normalisasi source_channel agar sesuai constraint check tabel intake_message
+    let sourceChannel = data.source_channel || 'wa_group';
+    if (sourceChannel === 'whatsapp') sourceChannel = 'wa_group';
+    if (sourceChannel === 'telegram_group' || sourceChannel === 'telegram_personal') sourceChannel = 'telegram';
+
     const payload = {
-      message_id:   data.message_id   || null,
-      source:       data.source       || 'whatsapp',
-      sender_name:  data.sender_name  || null,
-      sender_phone: data.sender_phone || null,
-      sender_id:    data.sender_id    || null,
-      message_text: data.message_text || null,
-      group_id:     data.group_id     || null,
-      group_name:   data.group_name   || null,
-      wa_timestamp: data.wa_timestamp || new Date().toISOString(),
-      status:       'pending',
+      source_channel:  sourceChannel,
+      source_ref:      data.source_ref      || null,
+      sender:          data.sender          || null,
+      thread_ref:      data.thread_ref      || null,
+      received_at:     data.received_at     || new Date().toISOString(),
+      body_text:       data.body_text       || null,
+      attachments:     data.attachments || data.attachment || null,
+      raw_payload:     data.raw_payload     || null,
+      idempotency_key: data.idempotency_key || data.idempotency_ref || null,
+      status:          'pending',
     };
 
     const { data: inserted, error } = await supabase
-      .from('raw_intake_messages')
+      .from('intake_message')
       .insert([payload])
-      .select('id, source, sender_name, group_name')
+      .select('id, source_channel, source_ref, sender')
       .single();
 
     if (error) {
-      console.error('❌ Gagal menyimpan raw intake message:', error.message);
+      // Jika error karena idempotency_key duplikat, skip dengan log warning
+      if (error.code === '23505') {
+        console.warn(`⚠️  Pesan duplikat (idempotency_key: ${payload.idempotency_key}) — dilewati`);
+        return null;
+      }
+      console.error('❌ Gagal menyimpan raw intake message ke intake_message:', error.message);
       return null;
     }
 
-    console.log(`   💾 Raw message tersimpan ke raw_intake_messages (id: ${inserted?.id})`);
+    console.log(`   💾 Raw message tersimpan ke intake_message (id: ${inserted?.id})`);
     return inserted;
 
   } catch (err) {
@@ -649,4 +663,109 @@ export async function saveRawIntakeMessage(data) {
     return null;
   }
 }
+
+
+// ====================== MARK RAW MESSAGE ======================
+/**
+ * Update status intake_message setelah diproses.
+ * Menghubungkan pesan raw ke tiket yang dibuat/ditemukan.
+ *
+ * @param {string|number} rawId       - PK dari intake_message
+ * @param {'processed'|'threaded'|'ignored'} status
+ * @param {string|null}  ticketId    - ticket_id yang terkait (null jika ignored)
+ * @param {string|null}  ignoreReason - Alasan diabaikan: 'small_talk' | 'not_relevant'
+ */
+export async function markRawMessageAs(rawId, status, ticketId = null, ignoreReason = null) {
+  try {
+    const { error } = await supabase
+      .from('intake_message')
+      .update({
+        status,
+        ticket_id:     ticketId,
+        processed_at:  new Date().toISOString(),
+        ignore_reason: ignoreReason,
+      })
+      .eq('id', rawId);
+
+    if (error) {
+      console.error(`❌ Gagal markRawMessageAs (id: ${rawId}, status: ${status}):`, error.message);
+      return false;
+    }
+
+    console.log(`   📌 intake_message[${rawId}] → status: ${status}${ticketId ? `, ticket: ${ticketId}` : ''}`);
+    return true;
+  } catch (err) {
+    console.error('❌ Unexpected error in markRawMessageAs:', err.message);
+    return false;
+  }
+}
+
+// ====================== FIND ACTIVE TICKETS BY GROUP ID ======================
+/**
+ * Cari semua tiket yang masih aktif (belum selesai) berdasarkan group_id.
+ * Digunakan untuk deteksi duplikat dan threading pesan baru.
+ *
+ * @param {string} groupId - ID grup WA/Telegram (remoteJid / chatId)
+ * @param {string} [source] - Filter opsional berdasarkan source channel
+ * @returns {Array} List tiket aktif
+ */
+export async function findActiveTicketsByGroupId(groupId, source = null) {
+  try {
+    let query = supabase
+      .from('Unified_Ticket_Tracker')
+      .select('*')
+      .eq('group_id', groupId)
+      .not('status', 'in', '("Done","Resolved","Cancelled","No Action","Logged (No Action)")')
+      .order('last_message_at', { ascending: false, nullsFirst: false })
+      .order('processed_at', { ascending: false })
+      .limit(5);
+
+    if (source) {
+      query = query.eq('source', source);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error(`❌ Error findActiveTicketsByGroupId (group: ${groupId}):`, error.message);
+      return [];
+    }
+
+    console.log(`🔍 Tiket aktif ditemukan di grup [${groupId}]: ${data?.length || 0} tiket`);
+    return data || [];
+  } catch (err) {
+    console.error('❌ Unexpected error in findActiveTicketsByGroupId:', err.message);
+    return [];
+  }
+}
+
+// ====================== GET PENDING RAW MESSAGES ======================
+/**
+ * Ambil pesan raw yang belum diproses (status = 'pending').
+ * Untuk kebutuhan batch processor di masa depan.
+ *
+ * @param {number} limit - Maksimum pesan yang diambil (default 50)
+ * @returns {Array} List raw messages
+ */
+export async function getPendingRawMessages(limit = 50) {
+  try {
+    const { data, error } = await supabase
+      .from('intake_message')
+      .select('*')
+      .eq('status', 'pending')
+      .order('received_at', { ascending: true })
+      .limit(limit);
+
+    if (error) {
+      console.error('❌ Gagal mengambil pending raw messages:', error.message);
+      return [];
+    }
+
+    return data || [];
+  } catch (err) {
+    console.error('❌ Unexpected error in getPendingRawMessages:', err.message);
+    return [];
+  }
+}
+
 

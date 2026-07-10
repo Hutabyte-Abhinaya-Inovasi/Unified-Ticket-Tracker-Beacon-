@@ -21,9 +21,10 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 import { env } from '../../config/env.js';
-import { saveRawTelegramDM } from '../../database/supabase.js';
+import { saveRawIntakeMessage } from '../../database/supabase.js';
 import { extractTicketFields } from '../ai/openaiService.js';
 import { sendIncidentAlert } from './telegramService.js';
+import { processRawMessage } from '../../usecases/processRawMessage.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -253,44 +254,51 @@ async function startUserAccount(account) {
         console.log(`   Waktu        : ${timestamp}`);
         console.log(`   Pesan        : ${messageText.substring(0, 120)}${messageText.length > 120 ? '...' : ''}`);
 
-        // ── STEP 1: Simpan raw data ke Supabase ──
-        const rawData = await saveRawTelegramDM({
-          messageId,
-          senderName,
-          senderPhone,
-          senderId,
-          messageText,
-          timestamp,
-          receiverPhone: phoneNumber,
-          receiverName: displayName,
+        // ── STEP 1: Simpan raw ke intake_message (skema baru) ──
+        const raw = await saveRawIntakeMessage({
+          source_channel:  'telegram',
+          source_ref:      senderId,                   // DM → source_ref = sender's user ID
+          sender:          senderPhone
+                             ? `${senderName} (${senderPhone})`
+                             : `${senderName} (${senderId})`,
+          thread_ref:      null,                       // Telegram DM tidak punya quote ID di MTProto
+          received_at:     timestamp,
+          body_text:       messageText,
+          attachments:     null,
+          raw_payload:     {
+            group_name:      `DM → ${displayName} (${phoneNumber})`,
+            telegram_msg_id: messageId,
+            sender_id:       senderId,
+            receiver_phone:  phoneNumber,
+            receiver_name:   displayName,
+          },
+          idempotency_key: `tg_dm_${messageId}`,      // unik per pesan Telegram
         });
 
-        console.log(`   💾 Raw data tersimpan (Ticket ID: ${rawData?.ticket_id || '?'})`);
-
-        // ── STEP 2: Proses AI untuk normalisasi & ekstraksi ──
-        console.log(`   🤖 Memproses dengan AI...`);
-        let analysis = {};
-        try {
-          analysis = await extractTicketFields(messageText);
-          console.log(`   ✅ AI selesai: ${analysis.category || '-'} | ${analysis.priority || '-'}`);
-        } catch (aiErr) {
-          console.warn(`   ⚠️  AI extraction gagal: ${aiErr.message}`);
+        if (raw) {
+          console.log(`   💾 Raw data tersimpan (id: ${raw.id})`);
         }
 
-        // ── STEP 3: Kirim alert ke grup Telegram via Bot ──
-        const emailObj = {
-          id: rawData?.ticket_id || `TG-DM-${Date.now()}`,
-          ticket_id: rawData?.ticket_id,
-          from: senderPhone ? `${senderName} (${senderPhone})` : senderName,
-          subject: `[DM Pribadi] Pesan dari ${senderName}`,
-          body: messageText,
-          source: 'telegram_personal',
-          group_name: `DM → ${displayName} (${phoneNumber})`,
-          messageId,
-        };
+        // ── STEP 2: Proses via pipeline terpadu ──
+        // processRawMessage menangani: small talk → relevance → threading → tiket baru
+        console.log(`   🤖 Memproses dengan pipeline standar...`);
+        await processRawMessage({
+          ...(raw || {}),
+          // Pastikan field wajib tersedia meski raw save gagal
+          id:              raw?.id || null,
+          source_channel:  'telegram',
+          source_ref:      senderId,
+          sender:          senderPhone ? `${senderName} (${senderPhone})` : `${senderName} (${senderId})`,
+          body_text:       messageText,
+          raw_payload:     {
+            group_name:    `DM → ${displayName} (${phoneNumber})`,
+            telegram_msg_id: messageId,
+          },
+          idempotency_key: `tg_dm_${messageId}`,
+        });
 
-        await sendIncidentAlert(emailObj, analysis);
-        console.log(`   ✅ Alert tiket dikirim ke grup Telegram`);
+        console.log(`   ✅ Pemrosesan selesai`);
+
 
       } catch (err) {
         console.error(`❌ Error memproses DM Telegram:`, err.message, err.stack);
