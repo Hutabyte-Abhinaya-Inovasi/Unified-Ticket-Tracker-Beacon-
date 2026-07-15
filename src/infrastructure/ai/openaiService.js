@@ -1,10 +1,10 @@
 // src/infrastructure/ai/openaiService.js
 import OpenAI from "openai";
 import { env } from "../../config/env.js";
-import { 
-  getTicketById, 
-  updateTicket, 
-  deleteTicket 
+import {
+  getTicketById,
+  updateTicket,
+  deleteTicket
 } from "../../database/supabase.js";
 import { supabase } from "../../database/supabase.js";
 
@@ -18,6 +18,9 @@ const client = new OpenAI({
 const AI_MODEL = isGemini ? "gemini-2.5-flash" : "gpt-4o-mini";
 
 const MAX_RETRY = 5;
+const TABLE_NAME = "Unified_Ticket_Tracker";
+const MAX_QUERY_ROWS = 100;
+const DEFAULT_QUERY_ROWS = 50;
 
 // ==================== TOOLS DEFINITION ====================
 const tools = [
@@ -25,7 +28,7 @@ const tools = [
     type: "function",
     function: {
       name: "get_ticket_detail",
-      description: "Menampilkan detail lengkap sebuah ticket berdasarkan ticket_id",
+      description: "Menampilkan detail lengkap SATU ticket berdasarkan ticket_id yang sudah diketahui secara pasti.",
       parameters: {
         type: "object",
         properties: {
@@ -38,14 +41,46 @@ const tools = [
   {
     type: "function",
     function: {
+      name: "query_tickets",
+      description:
+        "Mengambil DAFTAR tiket dari database berdasarkan filter fleksibel (status, kategori, prioritas, rentang tanggal, kata kunci, assignee). " +
+        "Gunakan tool ini untuk pertanyaan umum yang TIDAK menyebutkan ticket_id secara spesifik, misalnya: " +
+        "'apa tiket hari ini?', 'berapa tiket yang masih open?', 'ada masalah apa saja di server?', " +
+        "'apa saja incident bulan ini?', 'siapa yang paling banyak mengerjakan tiket minggu ini?', 'apa update terbaru?'. " +
+        "Setelah data mentah didapat, lakukan reasoning/agregasi/summarization sendiri untuk menjawab pengguna. " +
+        "PENTING: hasil berisi field 'count' (jumlah PASTI seluruh baris yang cocok filter, dari database) dan 'tickets' (daftar baris, dibatasi oleh limit). " +
+        "Untuk pertanyaan 'berapa/jumlah tiket ...', SELALU gunakan field 'count', JANGAN menghitung sendiri panjang array 'tickets' karena itu bisa terpotong oleh limit.",
+      parameters: {
+        type: "object",
+        properties: {
+          status: { type: "string", description: "Filter status persis, contoh: 'Open', 'In Progress', 'Done', 'Escalated', 'Cancelled'" },
+          category: { type: "string", description: "Filter kategori, contoh: 'Incident Management', 'Change Management'" },
+          priority: { type: "string", description: "Filter prioritas/severity, contoh: 'emergency', 'high', 'medium', 'low'" },
+          assignee: { type: "string", description: "Filter berdasarkan nama penanggung jawab tiket" },
+          keyword: { type: "string", description: "Kata kunci bebas untuk dicari di ringkasan/deskripsi tiket, contoh: 'server', 'VPN'" },
+          date_from: { type: "string", description: "Batas awal tanggal (ISO 8601, contoh: '2026-07-14T00:00:00'), berdasarkan created_at" },
+          date_to: { type: "string", description: "Batas akhir tanggal (ISO 8601), berdasarkan created_at" },
+          order_by: {
+            type: "string",
+            description: "Kolom untuk pengurutan, default 'created_at'",
+            enum: ["created_at", "updated_at", "priority", "status"]
+          },
+          limit: { type: "integer", description: `Jumlah maksimum baris yang diambil (default ${DEFAULT_QUERY_ROWS}, maksimum ${MAX_QUERY_ROWS})` }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "update_ticket",
       description: "Mengupdate data ticket (status, priority, category, dll)",
       parameters: {
         type: "object",
         properties: {
           ticket_id: { type: "string", description: "Ticket ID yang akan diupdate" },
-          updates: { 
-            type: "object", 
+          updates: {
+            type: "object",
             description: "Object berisi field yang ingin diubah, contoh: {status: 'Done', priority: 'HIGH'}"
           }
         },
@@ -69,15 +104,120 @@ const tools = [
   }
 ];
 
+// ==================== QUERY TICKETS (Flexible Retrieval) ====================
+/**
+ * Menerapkan filter yang sama ke sebuah query builder Supabase.
+ * Dipakai bersama baik untuk query data maupun query exact count,
+ * supaya keduanya selalu konsisten memfilter baris yang sama.
+ */
+function applyTicketFilters(query, filters) {
+  if (filters.status) {
+    query = query.eq("status", filters.status);
+  }
+  if (filters.category) {
+    query = query.eq("category", filters.category);
+  }
+  if (filters.priority) {
+    query = query.eq("priority", filters.priority);
+  }
+  if (filters.assignee) {
+    query = query.ilike("assignee", `%${filters.assignee}%`);
+  }
+  if (filters.keyword) {
+    const kw = `%${filters.keyword}%`;
+    // Cari di beberapa kolom teks sekaligus
+    query = query.or(
+      `summary.ilike.${kw},description.ilike.${kw},body.ilike.${kw},category.ilike.${kw}`
+    );
+  }
+  if (filters.date_from) {
+    query = query.gte("created_at", filters.date_from);
+  }
+  if (filters.date_to) {
+    query = query.lte("created_at", filters.date_to);
+  }
+  return query;
+}
+
+/**
+ * Mengambil daftar tiket dengan filter fleksibel dari Supabase.
+ * Dipakai oleh tool `query_tickets` agar AI tidak lagi terbatas pada pencarian by ticket_id.
+ *
+ * PENTING: `count` di hasil adalah JUMLAH PASTI (exact count dari Supabase) berdasarkan
+ * SELURUH baris yang cocok filter — bukan sekadar panjang array `tickets` yang dikembalikan.
+ * Ini karena `tickets` dibatasi oleh `limit` (maks 100 baris) agar tidak membebani konteks AI,
+ * sedangkan pertanyaan seperti "berapa jumlah tiket..." butuh angka yang akurat meskipun
+ * jumlah baris yang cocok lebih besar dari limit tersebut.
+ */
+async function queryTickets(filters = {}) {
+  try {
+    // 1. Hitung jumlah PASTI baris yang cocok filter (tidak terpengaruh limit)
+    let countQuery = supabase
+      .from(TABLE_NAME)
+      .select("*", { count: "exact", head: true });
+    countQuery = applyTicketFilters(countQuery, filters);
+    const { count, error: countError } = await countQuery;
+
+    if (countError) {
+      console.error("❌ queryTickets count error:", countError.message);
+      return { error: countError.message };
+    }
+
+    // 2. Ambil baris datanya (dibatasi limit) untuk detail/ringkasan
+    let dataQuery = supabase.from(TABLE_NAME).select("*");
+    dataQuery = applyTicketFilters(dataQuery, filters);
+
+    const orderBy = filters.order_by || "created_at";
+    dataQuery = dataQuery.order(orderBy, { ascending: false });
+
+    const limit = Math.min(
+      Number(filters.limit) > 0 ? Number(filters.limit) : DEFAULT_QUERY_ROWS,
+      MAX_QUERY_ROWS
+    );
+    dataQuery = dataQuery.limit(limit);
+
+    const { data, error } = await dataQuery;
+
+    if (error) {
+      console.error("❌ queryTickets error:", error.message);
+      return { error: error.message };
+    }
+
+    return {
+      count: count ?? data.length, // JUMLAH PASTI — gunakan ini untuk pertanyaan "berapa/jumlah"
+      returned: data.length,       // jumlah baris yang benar-benar dikirim (bisa < count jika terpotong limit)
+      truncated: (count ?? 0) > data.length,
+      tickets: data,
+    };
+  } catch (err) {
+    console.error("❌ queryTickets exception:", err.message);
+    return { error: err.message };
+  }
+}
+
+async function getActiveTickets() {
+  const result = await queryTickets({ status: "In Progress", limit: MAX_QUERY_ROWS });
+  return result.tickets || [];
+}
+
 // ==================== EXECUTE TOOL ====================
 async function executeTool(toolCall) {
   const functionName = toolCall.function.name;
-  const args = JSON.parse(toolCall.function.arguments);
+  let args = {};
+  try {
+    args = JSON.parse(toolCall.function.arguments || "{}");
+  } catch (parseErr) {
+    console.error(`Error parsing arguments for ${functionName}:`, parseErr.message);
+    return { error: "Argumen tool tidak valid" };
+  }
 
   try {
     switch (functionName) {
       case "get_ticket_detail":
         return await getTicketById(args.ticket_id);
+
+      case "query_tickets":
+        return await queryTickets(args);
 
       case "update_ticket":
         return await updateTicket(args.ticket_id, args.updates);
@@ -111,20 +251,50 @@ async function callOpenAIChatCompletion(options) {
       throw err;
     }
   }
+  // Semua percobaan rate-limit habis tanpa berhasil
+  throw new Error(`Gagal memanggil AI setelah ${MAX_RETRY} percobaan (rate limit).`);
 }
-async function getActiveTickets() {
-    const { data, error } = await supabase
-        .from("Unified_Ticket_Tracker")
-        .select("*")
-        .eq("status", "In Progress");
 
-    if (error) {
-        console.error(error);
-        return [];
-    }
+// ==================== HELPER: TANGGAL SERVER (WIB) ====================
+/**
+ * LLM tidak tahu tanggal "sekarang" secara real-time — ia hanya menebak dari data training,
+ * makanya pertanyaan seperti "kemarin" bisa dijawab dengan tanggal yang salah (mis. tahun training).
+ * Fungsi ini mengambil tanggal aktual dari server (timezone Asia/Jakarta) untuk disuntikkan
+ * ke system prompt, supaya AI menghitung "hari ini/kemarin/minggu ini/bulan ini" dari acuan yang benar.
+ */
+function getJakartaDateInfo() {
+  const now = new Date();
 
-    return data;
+  const isoDate = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Jakarta",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now); // contoh: 2026-07-14
+
+  const readable = new Intl.DateTimeFormat("id-ID", {
+    timeZone: "Asia/Jakarta",
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(now); // contoh: Selasa, 14 Juli 2026
+
+  const time = new Intl.DateTimeFormat("id-ID", {
+    timeZone: "Asia/Jakarta",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(now); // contoh: 10.45
+
+  // Hitung tanggal kemarin dengan aman berdasarkan isoDate (bukan objek Date lokal server)
+  const [y, m, d] = isoDate.split("-").map(Number);
+  const yesterday = new Date(Date.UTC(y, m - 1, d));
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+  const yesterdayIso = yesterday.toISOString().slice(0, 10);
+
+  return { isoDate, readable, time, yesterdayIso };
 }
+
 // ==================== CHAT WITH AI ====================
 async function chatWithAI(userInput, context = "") {
   // ─── LANGKAH RAG: RETRIEVAL ───
@@ -154,19 +324,50 @@ async function chatWithAI(userInput, context = "") {
   }
 
   // ─── LANGKAH AUGMENTATION & GENERATION ───
+  const { isoDate, readable, time, yesterdayIso } = getJakartaDateInfo();
+
   let messages = [
     {
       role: "system",
-      content: `Kamu adalah asisten ITSM "Beacon" yang cerdas, sopan, dan sangat membantu tim teknis.
-Gunakan bahasa Indonesia yang profesional.
+      content: `Anda adalah AI Assistant "Beacon", asisten ITSM yang cerdas, sopan, dan terhubung dengan basis data operasional (tiket, insiden, knowledge base) di Supabase.
 
-Tugas utama kamu adalah menjawab pertanyaan pengguna dan meberikan langkah langkah penyelesaian.
-Jika tersedia konteks dari knowledge base, gunakan informasi tersebut untuk memberikan jawaban yang lebih akurat dan relevan.
-Jika tidak ada konteks atau konteks tidak relevan, jawab pertanyaan sebaik mungkin berdasarkan pengetahuan umummu.
+### Informasi Waktu Saat Ini (WAJIB DIPAKAI, JANGAN GUNAKAN TANGGAL LAIN)
+- Sekarang: ${readable}, pukul ${time} WIB
+- Tanggal hari ini (format YYYY-MM-DD): ${isoDate}
+- Tanggal kemarin (format YYYY-MM-DD): ${yesterdayIso}
+- SELALU hitung "hari ini", "kemarin", "minggu ini", "bulan ini", dsb berdasarkan tanggal di atas. JANGAN PERNAH menggunakan tanggal dari pengetahuan internal/training Anda — tanggal tersebut sudah usang dan SALAH.
+- Saat memanggil tool \`query_tickets\` dengan filter \`date_from\`/\`date_to\`, gunakan format ISO penuh berdasarkan tanggal di atas, contoh untuk "kemarin": date_from = "${yesterdayIso}T00:00:00", date_to = "${yesterdayIso}T23:59:59".
 
-Kamu juga memiliki kemampuan untuk melihat, mengupdate, dan menghapus ticket menggunakan tools yang tersedia. Jika user meminta tindakan terkait tiket, gunakan tool yang sesuai.
+### Tugas Utama
+1. Selalu gunakan data dari Supabase sebagai sumber informasi utama. Jangan pernah mengasumsikan atau menciptakan informasi.
+2. Pahami intent pengguna terlebih dahulu — pengguna bisa bertanya secara bebas mengenai seluruh knowledge base, tidak hanya berdasarkan nomor tiket.
+3. Tentukan data apa yang perlu diambil dari Supabase, lalu lakukan retrieval terhadap SELURUH data yang relevan (bukan hanya berdasarkan ticket_id).
+4. Setelah data diperoleh, lakukan reasoning, agregasi, atau summarization untuk menghasilkan jawaban yang akurat dan informatif.
+5. Jika data relevan tidak ditemukan di Supabase, jelaskan dengan sopan bahwa informasi tersebut tidak tersedia.
 
-${retrievedContext}` // Konteks dari RAG disisipkan di sini
+### Tools yang Tersedia
+- \`get_ticket_detail\`: gunakan HANYA jika pengguna menyebutkan satu ticket_id spesifik.
+- \`query_tickets\`: gunakan untuk pertanyaan umum/bebas yang TIDAK menyebutkan ticket_id — filter berdasarkan status, kategori, prioritas, assignee, kata kunci, atau rentang tanggal. Contoh: "apa tiket hari ini?", "berapa tiket yang masih open?", "ada masalah apa saja di server?", "siapa yang paling banyak mengerjakan tiket minggu ini?".
+- \`update_ticket\` dan \`delete_ticket\`: gunakan hanya saat pengguna eksplisit meminta perubahan/penghapusan data pada ticket_id tertentu.
+- Konteks RAG di bawah (jika ada) adalah sumber utama untuk pertanyaan seputar knowledge base, SOP, atau solusi teknis.
+
+### Aturan Retrieval
+Sesuaikan filter \`query_tickets\` dengan isi pertanyaan, contoh:
+- "Apa tiket hari ini?" → filter tanggal hari ini.
+- "Berapa tiket yang masih open?" → filter status Open.
+- "Siapa yang paling banyak mengerjakan tiket minggu ini?" → ambil tiket minggu ini, lalu agregasikan berdasarkan assignee.
+- "Ada masalah apa saja di server?" → filter keyword "server".
+- "Apa saja incident bulan ini?" → filter kategori Incident + rentang tanggal bulan berjalan.
+- "Ada issue penting?" → filter priority High/Critical dan status belum selesai.
+- "Apa update terbaru?" → urutkan berdasarkan updated_at.
+
+### Aturan Jawaban
+- Jawaban harus selalu berdasarkan data hasil retrieval, jangan mengarang informasi.
+- Untuk pertanyaan "berapa/jumlah tiket ...", gunakan field \`count\` dari hasil \`query_tickets\` (jumlah pasti dari database), BUKAN menghitung sendiri panjang daftar \`tickets\` yang dikembalikan (daftar itu dibatasi jumlahnya).
+- Jika data terlalu banyak, tampilkan ringkasan terlebih dahulu, lalu tawarkan detail lebih lanjut jika diminta.
+- Gunakan bahasa Indonesia yang profesional dan selalu siap membantu.
+
+${retrievedContext}`
     },
     { role: "user", content: userInput + context }
   ];
@@ -243,7 +444,7 @@ export async function indexDocument(title, content, source = 'manual') {
 // ==================== ANALYZE EMAIL (untuk WhatsApp) ====================
 async function analyzeEmail(email) {
   const fullText = `${email.subject} ${email.body}`.trim();
-  
+
   if (isSmallTalk(fullText)) {
     console.log("🟡 Pesan diabaikan (small talk):", fullText.substring(0, 60));
     return {
@@ -303,13 +504,16 @@ Body:
 ${safeBody}
 `;
 
+  // Dideklarasikan di luar try agar tetap bisa diakses dari blok catch untuk logging.
+  let text = "";
+
   try {
     const response = await callOpenAIChatCompletion({
       model: AI_MODEL,
       messages: [
-        { 
-          role: "system", 
-          content: "Anda adalah AI ITSM yang akurat. Selalu kembalikan pesan asli tanpa diringkas. Jawab hanya dengan JSON." 
+        {
+          role: "system",
+          content: "Anda adalah AI ITSM yang akurat. Selalu kembalikan pesan asli tanpa diringkas. Jawab hanya dengan JSON."
         },
         { role: "user", content: prompt }
       ],
@@ -317,9 +521,9 @@ ${safeBody}
       temperature: 0.1,
     });
 
-    let text = response.choices[0]?.message?.content || "";
+    text = response.choices[0]?.message?.content || "";
     text = cleanJSON(text);
-    
+
     const parsed = JSON.parse(text);
 
     return {
@@ -329,14 +533,13 @@ ${safeBody}
       original_message: parsed.original_message || email.body,
       subject: email.subject,
       category: parsed.category || ruleResult.category,
-      priority: parsed.priority || ruleResult.priority,
+      priority: parsed.severity || ruleResult.priority,
       response: parsed.response || null,
       reason: parsed.isRelevant === false ? "ai_filtered" : "processed",
     };
 
   } catch (err) {
     if (err instanceof SyntaxError) {
-      console.warn("❌ JSON parse error dari AI");
       console.warn("❌ JSON parse error dari AI. Menganggap tidak relevan.", text);
     } else {
       console.error("OpenAI Error:", err.message);
@@ -354,17 +557,6 @@ ${safeBody}
       response: null,
     };
   }
-
-  return {
-    shouldProcess: true,
-    isRelevant: true,
-    confidence_score: 100,
-    original_message: email.body,
-    subject: email.subject,
-    category: ruleResult.category,
-    priority: ruleResult.priority,
-    response: "Terima kasih, laporan Anda sedang diproses oleh tim kami.",
-  };
 }
 
 // ==================== EXTRACT TICKET FIELDS (untuk Manual Input Telegram) ====================
@@ -403,7 +595,7 @@ ${rawText}
 `;
 
   try {
-    const response = await client.chat.completions.create({
+    const response = await callOpenAIChatCompletion({
       model: AI_MODEL,
       messages: [
         {
@@ -427,7 +619,6 @@ ${rawText}
       "Change Management",
       "Problem Management"
     ];
-    const validSeverities = ["emergency", "high", "medium", "low", "others"];
     const validIssueTypes = [
       "Change Management",
       "Incident Management",
@@ -644,8 +835,6 @@ Keluarkan hasil analisis dalam format JSON valid berikut:
   }
 }
 
-
-
 async function detectStatusChangeFromReply(text) {
   try {
     const prompt = `Anda adalah asisten triase operasional IT.
@@ -687,13 +876,14 @@ Keluarkan hasil dalam format JSON valid berikut:
   }
 }
 
-export { 
+export {
   getActiveTickets,
-  chatWithAI, 
+  queryTickets,
+  getJakartaDateInfo,
+  chatWithAI,
   analyzeEmail,
   checkMessageRelevance,
   routeMessageToActiveTickets,
   detectStatusChangeFromReply,
   extractTicketFields
-  
 };

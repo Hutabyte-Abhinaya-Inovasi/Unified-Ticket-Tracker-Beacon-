@@ -862,6 +862,7 @@ async function sendIncidentAlert(email, analysis = {}, customMessage = null) {
     console.log(`✅ Alert terkirim ke Telegram (message_id: ${telegramMessageId})`);
   } catch (err) {
     console.error("⚠️ Gagal mengirim notifikasi alert ke Telegram:", err.message);
+    // Jangan hentikan proses, biarkan tiket tetap tersimpan di database.
   }
 
   // Simpan telegramChatId berformat "alertChatId|monitoredGroupId" agar bisa dilacak
