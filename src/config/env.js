@@ -15,6 +15,12 @@ export const env = {
   TG_API_HASH: process.env.TG_API_HASH || null,
   TG_PHONE_NUMBER: process.env.TG_PHONE_NUMBER || null,
   TG_2FA_PASSWORD: process.env.TG_2FA_PASSWORD || null,
+  // Grup khusus
+  TG_BEACON_CHAT_ID: process.env.TG_BEACON_CHAT_ID || '-5546265953',
+  TG_UTT_CHAT_ID: process.env.TG_UTT_CHAT_ID || '-1003753882093',
+  // ClickUp integration (opsional)
+  CLICKUP_API_KEY: process.env.CLICKUP_API_KEY || null,
+  CLICKUP_LIST_ID: process.env.CLICKUP_LIST_ID || null,
 };
 
 if (!env.TG_TOKEN) {

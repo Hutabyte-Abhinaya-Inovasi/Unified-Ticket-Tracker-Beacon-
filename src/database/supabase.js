@@ -340,6 +340,39 @@ export async function getTicketsByDateRange(days = 7) {
   return data || [];
 }
 
+/**
+ * Ambil tiket berdasarkan tanggal spesifik dalam timezone WIB (Asia/Jakarta).
+ * @param {string} dateStr - Format YYYY-MM-DD, contoh: '2026-07-15'
+ * @param {number} [limit=15] - Maksimum tiket yang diambil
+ * @returns {Promise<Array>} List tiket
+ */
+export async function getTicketsByDate(dateStr, limit = 15) {
+  try {
+    // Konversi tanggal WIB ke UTC range agar query tepat
+    // WIB = UTC+7, jadi YYYY-MM-DD 00:00 WIB = YYYY-MM-DD-1 17:00 UTC
+    const startWib = new Date(`${dateStr}T00:00:00+07:00`);
+    const endWib   = new Date(`${dateStr}T23:59:59+07:00`);
+
+    const { data, error } = await supabase
+      .from('Unified_Ticket_Tracker')
+      .select('ticket_id, subject, summary, priority, status, processed_at, from, category')
+      .gte('processed_at', startWib.toISOString())
+      .lte('processed_at', endWib.toISOString())
+      .order('processed_at', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      console.error(`❌ Gagal mengambil tiket tanggal ${dateStr}:`, error.message);
+      return [];
+    }
+
+    return data || [];
+  } catch (err) {
+    console.error('❌ Unexpected error in getTicketsByDate:', err.message);
+    return [];
+  }
+}
+
 export async function searchTickets(keyword) {
   if (!keyword?.trim()) return [];
 

@@ -11,8 +11,9 @@ import { startOutlookListener } from "./infrastructure/outlook/outlookService.js
 console.log("🚀 Unified Incident Intake System");
 console.log("=====================================");
 
-let whatsappSock = null;
-let telegramUserClient = null;
+let whatsappSock        = null;
+let telegramUserClient  = null;
+let stopEmailListener   = null;
 
 async function start() {
   try {
