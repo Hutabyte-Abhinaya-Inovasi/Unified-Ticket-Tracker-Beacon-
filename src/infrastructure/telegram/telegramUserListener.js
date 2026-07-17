@@ -354,6 +354,12 @@ async function startUserAccount(account) {
         const senderId = sender?.id?.toString() || 'unknown';
         if (senderId === myId) return;
 
+        // Abaikan pesan dari bot itu sendiri (berdasarkan username dari .env)
+        if (env.TG_BOT_USERNAME && sender?.username === env.TG_BOT_USERNAME) {
+          console.log(`   🟡 Pesan dari bot (@${sender.username}) diabaikan.`);
+          return;
+        }
+
         const senderName = [sender?.firstName, sender?.lastName].filter(Boolean).join(' ')
           || sender?.username
           || `User_${senderId}`;
