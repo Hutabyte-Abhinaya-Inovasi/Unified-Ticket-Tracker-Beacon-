@@ -157,6 +157,17 @@ function initTelegramBot() {
 
   // ─────── MESSAGE HANDLER ───────
   bot.on('message', async (msg) => {
+    // Debugging sementara untuk melihat semua pesan masuk
+    console.log('TELEGRAM MESSAGE:', {
+      text: msg.text,
+      chatId: msg.chat.id,
+      chatType: msg.chat.type,
+      username: msg.from.username,
+      from: msg.from.id,
+      is_bot: msg.from.is_bot
+    });
+
+
     if (!msg.text || msg.from?.is_bot) return;
     if (msg.text.startsWith('/')) return; // skip semua commands
 

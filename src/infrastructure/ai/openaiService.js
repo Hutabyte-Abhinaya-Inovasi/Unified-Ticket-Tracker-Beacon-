@@ -1,21 +1,8 @@
-// src/infrastructure/ai/openaiService.js
-import OpenAI from "openai";
 import { env } from "../../config/env.js";
-import {
-  getTicketById,
-  updateTicket,
-  deleteTicket
-} from "../../database/supabase.js";
+import { getTicketById } from "../../database/supabase.js";
 import { supabase } from "../../database/supabase.js";
-
-const isGemini = !!env.GEMINI_API_KEY;
-
-const client = new OpenAI({
-  apiKey: env.GEMINI_API_KEY || env.OPENAI_API_KEY,
-  baseURL: isGemini ? "https://generativelanguage.googleapis.com/v1beta/openai/" : undefined,
-});
-// Model untuk chat completion
-const AI_MODEL = isGemini ? "gemini-2.5-flash" : "gpt-4o-mini";
+import { client, AI_MODEL, callOpenAIChatCompletion, cleanJSON } from "./aiClient.js";
+import { runPipeline } from "./pipeline/runPipeline.js";
 
 const MAX_RETRY = 5;
 const TABLE_NAME = "Unified_Ticket_Tracker";
@@ -43,115 +30,142 @@ const tools = [
     function: {
       name: "query_tickets",
       description:
-        "Mengambil DAFTAR tiket dari database berdasarkan filter fleksibel (status, kategori, prioritas, rentang tanggal, kata kunci, assignee). " +
+        "Mengambil DAFTAR tiket dari database berdasarkan filter fleksibel (status, kategori, prioritas, subjek, rentang tanggal, kata kunci, assignee, source, action_needed). " +
         "Gunakan tool ini untuk pertanyaan umum yang TIDAK menyebutkan ticket_id secara spesifik, misalnya: " +
         "'apa tiket hari ini?', 'berapa tiket yang masih open?', 'ada masalah apa saja di server?', " +
-        "'apa saja incident bulan ini?', 'siapa yang paling banyak mengerjakan tiket minggu ini?', 'apa update terbaru?'. " +
-        "Setelah data mentah didapat, lakukan reasoning/agregasi/summarization sendiri untuk menjawab pengguna. " +
+        "'apa saja incident bulan ini?', 'siapa yang paling banyak mengerjakan tiket minggu ini?', 'apa update terbaru?', " +
+        "'tiket dengan subjek Testing UTT', 'ceritakan detail tiket yang subjeknya soal VPN'. " +
+        "Jika user menyebutkan JUDUL/SUBJEK tiket (bukan ticket_id), gunakan parameter 'subject' agar hasilnya presisi. " +
+        "Setelah data mentah didapat, lakukan reasoning/agregasi/summarization sendiri untuk menjawab pengguna — termasuk detail spesifik seperti body, assignee, source, action_needed jika ditanya. " +
         "PENTING: hasil berisi field 'count' (jumlah PASTI seluruh baris yang cocok filter, dari database) dan 'tickets' (daftar baris, dibatasi oleh limit). " +
         "Untuk pertanyaan 'berapa/jumlah tiket ...', SELALU gunakan field 'count', JANGAN menghitung sendiri panjang array 'tickets' karena itu bisa terpotong oleh limit.",
       parameters: {
         type: "object",
         properties: {
-          status: { type: "string", description: "Filter status persis, contoh: 'Open', 'In Progress', 'Done', 'Escalated', 'Cancelled'" },
-          category: { type: "string", description: "Filter kategori, contoh: 'Incident Management', 'Change Management'" },
-          priority: { type: "string", description: "Filter prioritas/severity, contoh: 'emergency', 'high', 'medium', 'low'" },
+          status: {
+            type: "string",
+            description: "Filter status tiket. Nilai yang valid di database, pilih salah satu yang paling sesuai maksud user.",
+            enum: ["Open", "In Progress", "Done", "Escalated", "Cancelled"]
+          },
+          category: {
+            type: "string",
+            description: "Filter kategori tiket. Nilai yang valid di database, pilih salah satu yang paling sesuai maksud user (mis. 'insiden'/'gangguan' → 'Incident Management', 'permintaan'/'request' → 'Service Request Management', 'perubahan'/'deploy' → 'Change Management', 'masalah berulang' → 'Problem Management').",
+            enum: ["Incident Management", "Service Request Management", "Change Management", "Problem Management"]
+          },
+          priority: {
+            type: "string",
+            description: "Filter prioritas/severity tiket. Nilai yang valid di database, pilih salah satu yang paling sesuai maksud user (mis. 'urgent'/'darurat'/'kritis' → 'emergency', 'penting' → 'high', 'lambat'/'intermittent' → 'medium').",
+            enum: ["emergency", "high", "medium", "low", "others"]
+          },
           assignee: { type: "string", description: "Filter berdasarkan nama penanggung jawab tiket" },
-          keyword: { type: "string", description: "Kata kunci bebas untuk dicari di ringkasan/deskripsi tiket, contoh: 'server', 'VPN'" },
-          date_from: { type: "string", description: "Batas awal tanggal (ISO 8601, contoh: '2026-07-14T00:00:00'), berdasarkan created_at" },
-          date_to: { type: "string", description: "Batas akhir tanggal (ISO 8601), berdasarkan created_at" },
+          subject: { type: "string", description: "Cari tiket berdasarkan subjek/judul (partial match), contoh: 'Testing UTT'" },
+          source: { type: "string", description: "Filter sumber tiket, contoh: 'email', 'whatsapp', 'telegram'" },
+          action_needed: { type: "string", description: "Filter tindakan yang diperlukan pada tiket, sesuai isi kolom action_needed" },
+          keyword: { type: "string", description: "Kata kunci bebas untuk dicari di subject/summary/body/category, contoh: 'server', 'VPN'" },
+          date_from: { type: "string", description: "Batas awal tanggal (ISO 8601, contoh: '2026-07-14T00:00:00'), berdasarkan processed_at" },
+          date_to: { type: "string", description: "Batas akhir tanggal (ISO 8601), berdasarkan processed_at" },
           order_by: {
             type: "string",
-            description: "Kolom untuk pengurutan, default 'created_at'",
-            enum: ["created_at", "updated_at", "priority", "status"]
+            description: "Kolom untuk pengurutan, default 'processed_at'",
+            enum: ["processed_at", "priority", "status"]
           },
           limit: { type: "integer", description: `Jumlah maksimum baris yang diambil (default ${DEFAULT_QUERY_ROWS}, maksimum ${MAX_QUERY_ROWS})` }
         }
       }
     }
-  },
-  {
-    type: "function",
-    function: {
-      name: "update_ticket",
-      description: "Mengupdate data ticket (status, priority, category, dll)",
-      parameters: {
-        type: "object",
-        properties: {
-          ticket_id: { type: "string", description: "Ticket ID yang akan diupdate" },
-          updates: {
-            type: "object",
-            description: "Object berisi field yang ingin diubah, contoh: {status: 'Done', priority: 'HIGH'}"
-          }
-        },
-        required: ["ticket_id", "updates"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "delete_ticket",
-      description: "Menghapus sebuah ticket dari database",
-      parameters: {
-        type: "object",
-        properties: {
-          ticket_id: { type: "string", description: "Ticket ID yang akan dihapus" }
-        },
-        required: ["ticket_id"]
-      }
-    }
   }
 ];
 
-// ==================== QUERY TICKETS (Flexible Retrieval) ====================
-/**
- * Menerapkan filter yang sama ke sebuah query builder Supabase.
- * Dipakai bersama baik untuk query data maupun query exact count,
- * supaya keduanya selalu konsisten memfilter baris yang sama.
- */
+// ==================== NORMALISASI SINONIM FILTER ====================
+const PRIORITY_SYNONYMS = {
+  urgent: "emergency", darurat: "emergency", kritis: "emergency", critical: "emergency", emergency: "emergency",
+  tinggi: "high", high: "high", penting: "high",
+  sedang: "medium", medium: "medium", menengah: "medium", lambat: "medium", intermittent: "medium",
+  rendah: "low", low: "low", minor: "low",
+  lainnya: "others", others: "others",
+};
+
+const CATEGORY_SYNONYMS = {
+  incident: "Incident Management",
+  insiden: "Incident Management",
+  gangguan: "Incident Management",
+  "incident management": "Incident Management",
+  request: "Service Request Management",
+  "service request": "Service Request Management",
+  permintaan: "Service Request Management",
+  "permintaan layanan": "Service Request Management",
+  "service request management": "Service Request Management",
+  change: "Change Management",
+  perubahan: "Change Management",
+  deploy: "Change Management",
+  "change management": "Change Management",
+  problem: "Problem Management",
+  masalah: "Problem Management",
+  "masalah berulang": "Problem Management",
+  "problem management": "Problem Management",
+};
+
+const STATUS_SYNONYMS = {
+  open: "Open", terbuka: "Open", baru: "Open",
+  "in progress": "In Progress", diproses: "In Progress", proses: "In Progress", berjalan: "In Progress",
+  done: "Done", selesai: "Done", beres: "Done", resolved: "Done",
+  escalated: "Escalated", eskalasi: "Escalated", dieskalasi: "Escalated",
+  cancelled: "Cancelled", canceled: "Cancelled", batal: "Cancelled", dibatalkan: "Cancelled",
+};
+
+function normalizeFilterValue(value, synonymMap) {
+  if (!value) return value;
+  const key = value.toString().trim().toLowerCase();
+  return synonymMap[key] || value;
+}
+
 function applyTicketFilters(query, filters) {
   if (filters.status) {
-    query = query.eq("status", filters.status);
+    const normalized = normalizeFilterValue(filters.status, STATUS_SYNONYMS);
+    query = query.ilike("status", `%${normalized}%`);
   }
   if (filters.category) {
-    query = query.eq("category", filters.category);
+    const normalized = normalizeFilterValue(filters.category, CATEGORY_SYNONYMS);
+    query = query.ilike("category", `%${normalized}%`);
   }
   if (filters.priority) {
-    query = query.eq("priority", filters.priority);
+    const normalized = normalizeFilterValue(filters.priority, PRIORITY_SYNONYMS);
+    query = query.ilike("priority", `%${normalized}%`);
   }
   if (filters.assignee) {
     query = query.ilike("assignee", `%${filters.assignee}%`);
   }
+  if (filters.subject) {
+    query = query.ilike("subject", `%${filters.subject}%`);
+  }
+  if (filters.source) {
+    query = query.ilike("source", `%${filters.source}%`);
+  }
+  if (filters.action_needed) {
+    query = query.ilike("action_needed", `%${filters.action_needed}%`);
+  }
   if (filters.keyword) {
     const kw = `%${filters.keyword}%`;
-    // Cari di beberapa kolom teks sekaligus
     query = query.or(
-      `summary.ilike.${kw},description.ilike.${kw},body.ilike.${kw},category.ilike.${kw}`
+      `subject.ilike.${kw},summary.ilike.${kw},body.ilike.${kw},category.ilike.${kw}`
     );
   }
   if (filters.date_from) {
-    query = query.gte("created_at", filters.date_from);
+    query = query.gte("processed_at", filters.date_from);
   }
   if (filters.date_to) {
-    query = query.lte("created_at", filters.date_to);
+    query = query.lte("processed_at", filters.date_to);
   }
   return query;
 }
 
 /**
- * Mengambil daftar tiket dengan filter fleksibel dari Supabase.
+ * Mengambil daftar tiket dengan filter dari Supabase.
  * Dipakai oleh tool `query_tickets` agar AI tidak lagi terbatas pada pencarian by ticket_id.
- *
- * PENTING: `count` di hasil adalah JUMLAH PASTI (exact count dari Supabase) berdasarkan
- * SELURUH baris yang cocok filter — bukan sekadar panjang array `tickets` yang dikembalikan.
- * Ini karena `tickets` dibatasi oleh `limit` (maks 100 baris) agar tidak membebani konteks AI,
- * sedangkan pertanyaan seperti "berapa jumlah tiket..." butuh angka yang akurat meskipun
- * jumlah baris yang cocok lebih besar dari limit tersebut.
  */
 async function queryTickets(filters = {}) {
   try {
-    // 1. Hitung jumlah PASTI baris yang cocok filter (tidak terpengaruh limit)
+    //  Hitung jumlah PASTI baris yang cocok filter (tidak terpengaruh limit)
     let countQuery = supabase
       .from(TABLE_NAME)
       .select("*", { count: "exact", head: true });
@@ -163,11 +177,11 @@ async function queryTickets(filters = {}) {
       return { error: countError.message };
     }
 
-    // 2. Ambil baris datanya (dibatasi limit) untuk detail/ringkasan
+    //  Ambil baris datanya (dibatasi limit) untuk detail/ringkasan
     let dataQuery = supabase.from(TABLE_NAME).select("*");
     dataQuery = applyTicketFilters(dataQuery, filters);
 
-    const orderBy = filters.order_by || "created_at";
+    const orderBy = filters.order_by || "processed_at";
     dataQuery = dataQuery.order(orderBy, { ascending: false });
 
     const limit = Math.min(
@@ -208,60 +222,34 @@ async function executeTool(toolCall) {
     args = JSON.parse(toolCall.function.arguments || "{}");
   } catch (parseErr) {
     console.error(`Error parsing arguments for ${functionName}:`, parseErr.message);
-    return { error: "Argumen tool tidak valid" };
+    return { functionName, args, rawResult: { error: "Argumen tool tidak valid" } };
   }
 
+  let rawResult;
   try {
     switch (functionName) {
       case "get_ticket_detail":
-        return await getTicketById(args.ticket_id);
+        rawResult = await getTicketById(args.ticket_id);
+        break;
 
       case "query_tickets":
-        return await queryTickets(args);
+        rawResult = await queryTickets(args);
+        break;
 
-      case "update_ticket":
-        return await updateTicket(args.ticket_id, args.updates);
-
-      case "delete_ticket":
-        return await deleteTicket(args.ticket_id);
 
       default:
-        return { error: "Function tidak dikenal" };
+        rawResult = { error: `Aksi '${functionName}' tidak diizinkan. AI hanya bisa membaca data tiket (read-only), tidak bisa mengubah atau menghapus.` };
     }
   } catch (err) {
     console.error(`Error executing tool ${functionName}:`, err);
-    return { error: err.message };
+    rawResult = { error: err.message };
   }
+
+  return { functionName, args, rawResult };
 }
 
-// ==================== CALL OPENAI WITH RETRY ====================
-async function callOpenAIChatCompletion(options) {
-  let attempt = 0;
-  while (attempt < MAX_RETRY) {
-    try {
-      return await client.chat.completions.create(options);
-    } catch (err) {
-      attempt++;
-      if ((err.status === 429 || err.code === "rate_limit_exceeded") && attempt < MAX_RETRY) {
-        const wait = 2000 * attempt;
-        console.warn(`⏳ Rate Limit - Retry ${attempt}/${MAX_RETRY} dalam ${wait}ms`);
-        await delay(wait);
-        continue;
-      }
-      throw err;
-    }
-  }
-  // Semua percobaan rate-limit habis tanpa berhasil
-  throw new Error(`Gagal memanggil AI setelah ${MAX_RETRY} percobaan (rate limit).`);
-}
+// ==================== HELPER ====================
 
-// ==================== HELPER: TANGGAL SERVER (WIB) ====================
-/**
- * LLM tidak tahu tanggal "sekarang" secara real-time — ia hanya menebak dari data training,
- * makanya pertanyaan seperti "kemarin" bisa dijawab dengan tanggal yang salah (mis. tahun training).
- * Fungsi ini mengambil tanggal aktual dari server (timezone Asia/Jakarta) untuk disuntikkan
- * ke system prompt, supaya AI menghitung "hari ini/kemarin/minggu ini/bulan ini" dari acuan yang benar.
- */
 function getJakartaDateInfo() {
   const now = new Date();
 
@@ -278,15 +266,14 @@ function getJakartaDateInfo() {
     day: "numeric",
     month: "long",
     year: "numeric",
-  }).format(now); // contoh: Selasa, 14 Juli 2026
+  }).format(now); 
 
   const time = new Intl.DateTimeFormat("id-ID", {
     timeZone: "Asia/Jakarta",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(now); // contoh: 10.45
+  }).format(now); 
 
-  // Hitung tanggal kemarin dengan aman berdasarkan isoDate (bukan objek Date lokal server)
   const [y, m, d] = isoDate.split("-").map(Number);
   const yesterday = new Date(Date.UTC(y, m - 1, d));
   yesterday.setUTCDate(yesterday.getUTCDate() - 1);
@@ -295,16 +282,66 @@ function getJakartaDateInfo() {
   return { isoDate, readable, time, yesterdayIso };
 }
 
+// ==================== Agent RAG BERBASIS KATEGORI ====================
+
+const CATEGORY_ALIASES = {
+  "Incident Management": ["incident", "insiden", "gangguan", "error", "down", "mati"],
+  "Service Request Management": ["service request", "permintaan layanan", "request", "akses", "password", "login"],
+  "Change Management": ["change management", "perubahan", "deploy", "upgrade", "rilis"],
+  "Problem Management": ["problem management", "berulang", "recurring", "akar masalah", "root cause"],
+};
+
+function detectRequestedCategory(text) {
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  for (const [category, aliases] of Object.entries(CATEGORY_ALIASES)) {
+    if (aliases.some((alias) => lower.includes(alias))) {
+      return category;
+    }
+  }
+  return null;
+}
+
+async function retrieveDocumentsByCategory(category) {
+  if (!category) return [];
+  try {
+    const { data, error } = await supabase
+      .from("knowledge_base")
+      .select("title, content, source, category")
+      .eq("category", category)
+      .limit(3);
+
+    if (error) {
+      console.warn(
+        "⚠️ Retrieval berbasis kategori tidak aktif (kemungkinan kolom 'category' belum ada di tabel knowledge_base):",
+        error.message
+      );
+      return [];
+    }
+    return data || [];
+  } catch (err) {
+    console.warn("⚠️ Gagal mengambil dokumen berdasarkan kategori:", err.message);
+    return [];
+  }
+}
+
 // ==================== CHAT WITH AI ====================
 async function chatWithAI(userInput, context = "") {
   // ─── LANGKAH RAG: RETRIEVAL ───
   let retrievedContext = "";
   try {
-    // 1. Buat embedding dari pertanyaan user
-    const queryEmbedding = await createEmbedding(userInput);
+    // 0. Deteksi apakah user menyinggung kategori tertentu (rule-based, cepat)
+    const detectedCategory = detectRequestedCategory(userInput);
 
+    // 1. Buat embedding dari pertanyaan user + cari dokumen berbasis kategori (jika terdeteksi) SECARA PARALEL
+    const [queryEmbedding, categoryDocuments] = await Promise.all([
+      createEmbedding(userInput),
+      retrieveDocumentsByCategory(detectedCategory),
+    ]);
+
+    let semanticDocuments = [];
     if (queryEmbedding) {
-      // 2. Cari dokumen relevan di Supabase
+      // 2. Cari dokumen relevan di Supabase berdasarkan kemiripan makna (semantic search)
       const { data: documents, error } = await supabase.rpc('match_documents', {
         query_embedding: queryEmbedding,
         match_threshold: 0.75, // Tingkat kemiripan minimum
@@ -314,10 +351,27 @@ async function chatWithAI(userInput, context = "") {
       if (error) {
         console.error("❌ RAG search error:", error.message);
       } else if (documents && documents.length > 0) {
-        console.log(`📚 RAG: Ditemukan ${documents.length} dokumen relevan.`);
-        retrievedContext = "Berikut adalah beberapa konteks dari knowledge base yang mungkin relevan:\n\n" +
-          documents.map(doc => `--- Dokumen: ${doc.title} ---\n${doc.content}`).join("\n\n");
+        semanticDocuments = documents;
       }
+    }
+
+    // 3. Gabungkan hasil semantic search + kategori, hilangkan duplikat berdasarkan title
+    const combinedMap = new Map();
+    semanticDocuments.forEach((doc) => combinedMap.set(doc.title, doc));
+    categoryDocuments.forEach((doc) => {
+      if (!combinedMap.has(doc.title)) combinedMap.set(doc.title, doc);
+    });
+    const allDocuments = [...combinedMap.values()];
+
+    if (allDocuments.length > 0) {
+      console.log(
+        `📚 RAG: ${semanticDocuments.length} dokumen dari semantic search` +
+        (detectedCategory ? `, ${categoryDocuments.length} dokumen dari kategori "${detectedCategory}"` : "") +
+        ` (total unik: ${allDocuments.length}).`
+      );
+      retrievedContext = "Berikut adalah beberapa konteks dari knowledge base yang mungkin relevan" +
+        (detectedCategory ? ` (termasuk yang berkategori "${detectedCategory}")` : "") + ":\n\n" +
+        allDocuments.map(doc => `--- Dokumen: ${doc.title} ---\n${doc.content}`).join("\n\n");
     }
   } catch (ragError) {
     console.error("❌ Kesalahan pada proses RAG:", ragError.message);
@@ -338,32 +392,66 @@ async function chatWithAI(userInput, context = "") {
 - SELALU hitung "hari ini", "kemarin", "minggu ini", "bulan ini", dsb berdasarkan tanggal di atas. JANGAN PERNAH menggunakan tanggal dari pengetahuan internal/training Anda — tanggal tersebut sudah usang dan SALAH.
 - Saat memanggil tool \`query_tickets\` dengan filter \`date_from\`/\`date_to\`, gunakan format ISO penuh berdasarkan tanggal di atas, contoh untuk "kemarin": date_from = "${yesterdayIso}T00:00:00", date_to = "${yesterdayIso}T23:59:59".
 
+### Cara Membaca Hasil Tool (PENTING — sudah melalui pipeline validasi)
+Setiap kali Anda memanggil tool (\`get_ticket_detail\`, \`query_tickets\`), hasil yang Anda terima BUKAN data mentah dari Supabase — data tersebut sudah melewati pipeline validasi berlapis (Data Validation → Data Auditor → Business Logic Checker → Context Builder) sebelum sampai ke Anda. Bentuknya selalu seperti ini:
+{
+  "tool": "nama tool",
+  "arguments": { ...argumen yang dipakai... },
+  "data": { ...data asli hasil query, contoh untuk query_tickets: { count, returned, truncated, tickets } ... },
+  "pipeline_meta": {
+    "validation": { "valid": bool, "is_empty": bool, "is_error": bool, "issues": [...] },
+    "audit": { "consistent": bool, "confidence_score": 0-100, "inconsistencies": [...] },
+    "business_logic": { "compliant": bool, "violations": [...], "needs_more_data": bool, "additional_data_needed": ... }
+  },
+  "guidance_for_main_model": "rekomendasi singkat cara merespons"
+}
+Aturan wajib:
+- SELALU baca \`guidance_for_main_model\` dan \`pipeline_meta\` sebelum menyusun jawaban.
+- Kalau \`pipeline_meta.validation.is_error\` = true → sampaikan ke user bahwa ada kendala teknis mengambil data, JANGAN mengarang jawaban.
+- Kalau \`pipeline_meta.audit.confidence_score\` < 50 → sampaikan jawaban dengan hati-hati dan sebutkan ada ketidakpastian pada data.
+- Kalau \`pipeline_meta.business_logic.violations\` tidak kosong → pertimbangkan menyampaikan catatan tersebut ke user jika relevan.
+- Kalau \`pipeline_meta.business_logic.needs_more_data\` = true → pertimbangkan memanggil tool lain untuk melengkapi data sebelum menjawab final.
+- Data asli (untuk dijawabkan ke user) selalu ada di dalam field \`data\`, bukan di level teratas.
+
 ### Tugas Utama
-1. Selalu gunakan data dari Supabase sebagai sumber informasi utama. Jangan pernah mengasumsikan atau menciptakan informasi.
+1. Selalu gunakan data dari Supabase (lewat field \`data\` pada hasil tool) sebagai sumber informasi utama. Jangan pernah mengasumsikan atau menciptakan informasi.
 2. Pahami intent pengguna terlebih dahulu — pengguna bisa bertanya secara bebas mengenai seluruh knowledge base, tidak hanya berdasarkan nomor tiket.
 3. Tentukan data apa yang perlu diambil dari Supabase, lalu lakukan retrieval terhadap SELURUH data yang relevan (bukan hanya berdasarkan ticket_id).
-4. Setelah data diperoleh, lakukan reasoning, agregasi, atau summarization untuk menghasilkan jawaban yang akurat dan informatif.
+4. Setelah data diperoleh DAN sudah dicek lewat \`pipeline_meta\`, lakukan reasoning, agregasi, atau summarization untuk menghasilkan jawaban yang akurat dan informatif.
 5. Jika data relevan tidak ditemukan di Supabase, jelaskan dengan sopan bahwa informasi tersebut tidak tersedia.
 
 ### Tools yang Tersedia
 - \`get_ticket_detail\`: gunakan HANYA jika pengguna menyebutkan satu ticket_id spesifik.
-- \`query_tickets\`: gunakan untuk pertanyaan umum/bebas yang TIDAK menyebutkan ticket_id — filter berdasarkan status, kategori, prioritas, assignee, kata kunci, atau rentang tanggal. Contoh: "apa tiket hari ini?", "berapa tiket yang masih open?", "ada masalah apa saja di server?", "siapa yang paling banyak mengerjakan tiket minggu ini?".
-- \`update_ticket\` dan \`delete_ticket\`: gunakan hanya saat pengguna eksplisit meminta perubahan/penghapusan data pada ticket_id tertentu.
-- Konteks RAG di bawah (jika ada) adalah sumber utama untuk pertanyaan seputar knowledge base, SOP, atau solusi teknis.
+- \`query_tickets\`: gunakan untuk pertanyaan umum/bebas yang TIDAK menyebutkan ticket_id — filter berdasarkan status, kategori, prioritas, assignee, subject, source, action_needed, kata kunci, atau rentang tanggal. Contoh: "apa tiket hari ini?", "berapa tiket yang masih open?", "ada masalah apa saja di server?", "siapa yang paling banyak mengerjakan tiket minggu ini?", "tiket dengan subjek Testing UTT hari ini".
+- \`update_ticket\` dan \`delete_ticket\` TIDAK TERSEDIA dan TIDAK BOLEH dipanggil. Anda HANYA memiliki akses baca (read-only) ke data tiket. Jika user meminta mengubah status, mengedit field, atau menghapus tiket, TOLAK dengan sopan dan jelaskan bahwa perubahan/penghapusan data harus dilakukan langsung oleh tim terkait melalui sistem/akses yang sesuai — bukan lewat AI ini.
+- Konteks RAG di bawah (jika ada) adalah sumber utama untuk pertanyaan seputar knowledge base, SOP, atau solusi teknis. Konteks ini sudah menggabungkan hasil pencarian semantik (kemiripan makna pertanyaan) DAN pencarian berbasis kategori tiket (kalau pertanyaan Anda menyinggung kategori tertentu seperti Incident/Problem/Change/Service Request Management) — jadi tidak perlu lagi mengandalkan tool untuk mengambil dokumen KB, cukup pakai konteks yang sudah disediakan.
+
+### Struktur Data Tiket (tabel Unified_Ticket_Tracker)
+Setiap tiket punya kolom: \`subject\` (judul/subjek tiket), \`body\` (isi/detail lengkap laporan), \`summary\` (ringkasan), \`category\`, \`assignee\` (penanggung jawab), \`status\`, \`processed_at\` (waktu tiket diproses — dipakai untuk semua filter tanggal), \`action_needed\` (tindakan yang diperlukan), \`source\` (asal laporan: email/whatsapp/telegram/dll), \`priority\`.
+Catatan: tabel ini TIDAK punya kolom nama pelapor terpisah — jika user menanyakan "siapa yang lapor" atau nama orang tertentu, jawab berdasarkan apa yang tertulis di \`body\`/\`summary\` (jika disebutkan di sana); jika tidak ada, sampaikan dengan jujur bahwa informasi itu tidak tercatat di data.
+
+Nilai valid untuk filter (pakai salah satu dari daftar ini bila memungkinkan):
+- \`priority\`: emergency, high, medium, low, others
+- \`category\`: Incident Management, Service Request Management, Change Management, Problem Management
+- \`status\`: Open, In Progress, Done, Escalated, Cancelled
+
+Jika user memakai istilah lain (misal "urgent"/"darurat"/"kritis" untuk priority, "insiden"/"gangguan" untuk category, "selesai"/"beres" untuk status), petakan dulu ke nilai valid di atas sebelum memanggil \`query_tickets\` — sistem juga sudah punya jaring pengaman normalisasi sinonim + pencarian partial, jadi query TIDAK akan gagal total hanya karena beda kata, tapi hasil paling akurat kalau Anda kirim nilai kanonik di atas.
 
 ### Aturan Retrieval
 Sesuaikan filter \`query_tickets\` dengan isi pertanyaan, contoh:
-- "Apa tiket hari ini?" → filter tanggal hari ini.
+- "Apa tiket hari ini?" → filter tanggal hari ini (berdasarkan processed_at).
 - "Berapa tiket yang masih open?" → filter status Open.
 - "Siapa yang paling banyak mengerjakan tiket minggu ini?" → ambil tiket minggu ini, lalu agregasikan berdasarkan assignee.
 - "Ada masalah apa saja di server?" → filter keyword "server".
 - "Apa saja incident bulan ini?" → filter kategori Incident + rentang tanggal bulan berjalan.
 - "Ada issue penting?" → filter priority High/Critical dan status belum selesai.
-- "Apa update terbaru?" → urutkan berdasarkan updated_at.
+- "Apa update terbaru?" → urutkan berdasarkan processed_at.
+- "Tiket dengan subjek Testing UTT hari ini" → filter \`subject\` = "Testing UTT" DAN rentang tanggal hari ini, lalu jawab dengan detail lengkap (body, assignee, status, priority, action_needed, source) dari tiket yang ditemukan.
 
 ### Aturan Jawaban
-- Jawaban harus selalu berdasarkan data hasil retrieval, jangan mengarang informasi.
-- Untuk pertanyaan "berapa/jumlah tiket ...", gunakan field \`count\` dari hasil \`query_tickets\` (jumlah pasti dari database), BUKAN menghitung sendiri panjang daftar \`tickets\` yang dikembalikan (daftar itu dibatasi jumlahnya).
+- Jawaban harus selalu berdasarkan data hasil retrieval (\`data\` pada hasil tool), jangan mengarang informasi.
+- Untuk pertanyaan detail spesifik tentang satu tiket (subjek, isi laporan, siapa yang menangani, prioritas, dll), sertakan semua kolom relevan yang tersedia di baris tiket tersebut.
+- Untuk pertanyaan "berapa/jumlah tiket ...", gunakan field \`data.count\` (jumlah pasti dari database), BUKAN menghitung sendiri panjang daftar \`data.tickets\` yang dikembalikan (daftar itu dibatasi jumlahnya).
 - Jika data terlalu banyak, tampilkan ringkasan terlebih dahulu, lalu tawarkan detail lebih lanjut jika diminta.
 - Gunakan bahasa Indonesia yang profesional dan selalu siap membantu.
 
@@ -391,12 +479,17 @@ ${retrievedContext}`
         messages.push(message);
 
         for (const toolCall of message.tool_calls) {
-          const toolResult = await executeTool(toolCall);
+          const { functionName, args, rawResult } = await executeTool(toolCall);
+
+          // ─── PIPELINE VALIDASI BERLAPIS (Agent 1-4) ───
+          // Data mentah dari Supabase TIDAK langsung dikirim ke Main Model.
+          // Harus lewat: Data Validation → Data Auditor → Business Logic Checker → Context Builder.
+          const validatedContext = await runPipeline(functionName, args, rawResult);
 
           messages.push({
             role: "tool",
             tool_call_id: toolCall.id,
-            content: JSON.stringify(toolResult)
+            content: JSON.stringify(validatedContext)
           });
         }
         continue;
@@ -431,12 +524,34 @@ async function createEmbedding(text) {
   }
 }
 
-// Fungsi baru untuk mengindeks sebuah dokumen (bisa dipanggil dari skrip terpisah)
-export async function indexDocument(title, content, source = 'manual') {
-  console.log(`📚 Mengindeks dokumen: "${title}"`);
+/**
+ * Mengindeks sebuah dokumen ke knowledge base, opsional dengan tag `category`
+ * (harus salah satu dari kategori resmi: Incident Management, Service Request Management,
+ * Change Management, Problem Management) supaya bisa ikut ditemukan oleh retrieval
+ * berbasis kategori di chatWithAI, selain lewat semantic search seperti biasa.
+ *
+ * Kalau kolom `category` belum ada di tabel `knowledge_base` (migrasi belum dijalankan),
+ * insert akan otomatis dicoba ulang TANPA field category, supaya indexing tetap jalan
+ * dan tidak gagal total hanya karena fitur kategori belum diaktifkan.
+ */
+export async function indexDocument(title, content, source = 'manual', category = null) {
+  console.log(`📚 Mengindeks dokumen: "${title}"${category ? ` (kategori: ${category})` : ""}`);
   const embedding = await createEmbedding(content);
   if (!embedding) return;
-  const { error } = await supabase.from('knowledge_base').insert({ title, content, source, embedding });
+
+  const payload = { title, content, source, embedding };
+  if (category) payload.category = category;
+
+  const { error } = await supabase.from('knowledge_base').insert(payload);
+
+  if (error && category) {
+    console.warn(`⚠️ Insert dengan category gagal (kemungkinan kolom belum ada), mencoba tanpa category:`, error.message);
+    const { error: fallbackError } = await supabase.from('knowledge_base').insert({ title, content, source, embedding });
+    if (fallbackError) console.error(`❌ Gagal menyimpan indeks:`, fallbackError.message);
+    else console.log(`   ✅ Dokumen berhasil diindeks (tanpa category — jalankan migrasi untuk mengaktifkan fitur kategori).`);
+    return;
+  }
+
   if (error) console.error(`❌ Gagal menyimpan indeks:`, error.message);
   else console.log(`   ✅ Dokumen berhasil diindeks.`);
 }
@@ -697,14 +812,6 @@ export function isSmallTalk(text) {
 function limitText(text, max = 2500) {
   if (!text) return "";
   return text.length > max ? text.slice(0, max) + "..." : text;
-}
-
-function cleanJSON(text) {
-  return text.replace(/```json/g, "").replace(/```/g, "").trim();
-}
-
-function delay(ms) {
-  return new Promise(res => setTimeout(res, ms));
 }
 
 function detectByRules(text) {
