@@ -2,17 +2,17 @@
 
 import Imap from "imap";
 import { simpleParser } from "mailparser";
-import { analyzeEmail } from "../ai/openaiService.js";
-import { sendIncidentAlert } from "../telegram/telegramService.js";
-import { saveEmailLog } from "../../database/supabase.js";
+//import { analyzeEmail } from "../ai/openaiService.js";
+//import { sendIncidentAlert } from "../telegram/telegramService.js";
+//import { saveEmailLog } from "../../database/supabase.js";
 import { env } from "../../config/env.js";
-
+import { saveRawIntakeMessage } from "../../database/supabase.js";
 const imapConfig = {
   user: env.EMAIL_USER,
   password: env.EMAIL_PASS,
-  host: "rama.tritronik.com",
-  port: 993,
-  tls: true,
+  host: env.EMAIL_HOST,
+  port: Number(env.EMAIL_PORT),
+  tls: env.EMAIL_SECURE,
   tlsOptions: { rejectUnauthorized: true },  
   authTimeout: 30000,
   keepalive: true,
@@ -39,13 +39,21 @@ function scheduleReconnect() {
   }, delay);
 }
 
+console.log("IMAP Config:", {
+  host: imapConfig.host,
+  port: imapConfig.port,
+  tls: imapConfig.tls,
+  user: imapConfig.user,
+});
+
 function connectIMAP() {
   console.log("🚀 Connecting to Outlook IMAP...");
 
   if (imap) {
     try { imap.end(); } catch {}
   }
-
+  
+  console.log("env.EMAIL_SECURE =", env.EMAIL_SECURE);
   imap = new Imap(imapConfig);
 
   imap.once("ready", () => {
@@ -59,6 +67,10 @@ function connectIMAP() {
     if (err.message.includes("authentication") || err.message.includes("login")) {
       console.error("💡 Saran: Pastikan menggunakan App Password (bukan password biasa) di .env");
     }
+     console.error("message:", err?.message);
+    console.error("source:", err?.source);
+    console.error("code:", err?.code);
+    console.error("stack:", err?.stack);
     scheduleReconnect();
   });
 
@@ -84,41 +96,63 @@ function openInbox() {
 
 function fetchUnread() {
   imap.search(["UNSEEN"], (err, results) => {
-    if (err || !results?.length) return;
+    if (err) {
+        console.error(err);
+        return;
+    }
 
-    const f = imap.fetch(results, { bodies: "", markSeen: true });
+    console.log("UNSEEN results:", results);
+
+    if (!results?.length) {
+        console.log("Tidak ada email UNSEEN");
+        return;
+    }
+
+    const f = imap.fetch(results, {
+      bodies: "",
+      markSeen: false, // ubah ke true nanti kalau sudah production
+    });
 
     f.on("message", (msg, seqno) => {
       msg.on("body", async (stream) => {
         try {
           const parsed = await simpleParser(stream);
-          const emailData = {
-            id: parsed.messageId || `${Date.now()}-${seqno}`,
-            from: parsed.from?.text || "Unknown",
-            subject: parsed.subject || "(No Subject)",
-            body: parsed.text || "",
-          };
-
-          console.log(`📨 Email masuk: ${emailData.subject}`);
-
-          const analysis = await analyzeEmail(emailData);
-          const category = (analysis.category || "").toLowerCase();
-          const priority = (analysis.priority || "").toUpperCase();
-
-          if (!category.includes("incident") || priority === "LOW") {
-            await saveEmailLog(emailData, analysis, false);
-            return;
-          }
-
-          await sendIncidentAlert(emailData, analysis);
-
+          console.log("📨 Email masuk");
+          console.log("Subject :", parsed.subject);
+          console.log("From    :", parsed.from?.text);
+          console.log("Date    :", parsed.date);
+          await saveRawIntakeMessage({
+              source_channel: "email",
+              source_ref: parsed.messageId,
+              sender: parsed.from?.text || "Unknown",
+              thread_ref: parsed.messageId,
+              received_at: parsed.date,
+              body_text: parsed.text,
+              attachments: {
+                  count: parsed.attachments?.length || 0,
+              },
+              raw_payload: parsed,
+              idempotency_key: `email-${parsed.messageId}`,
+          });
+          console.log("✅ Email berhasil disimpan ke raw_intake_messages");
         } catch (err) {
           console.error("❌ Error processing email:", err.message);
         }
       });
     });
+    f.once("error", (err) => {
+      console.error("Fetch error:", err);
+    });
+
+    f.once("end", () => {
+      console.log("✅ Selesai memproses batch email");
+    });
+
   });
+
+
 }
+
 
 export function startOutlookListener() {
   connectIMAP();

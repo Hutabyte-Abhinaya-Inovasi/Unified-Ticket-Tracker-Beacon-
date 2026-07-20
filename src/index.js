@@ -10,7 +10,7 @@ import { startOutlookListener } from "./infrastructure/outlook/outlookService.js
 // import { authorize } from "./config/gmailAuth.js";
 // import { forwardUnreadEmail } from "./usecases/forwardUnreadEmail.js";
 import { startGmailListener } from "./infrastructure/gmail/gmailListener.js";
-
+import { startClickupListener } from "./infrastructure/clickup/clickupListener.js";
 console.log("🚀 Unified Incident Intake System");
 console.log("=====================================");
 
@@ -25,19 +25,24 @@ async function start() {
     // await forwardUnreadEmail(auth);
     // console.log("✅ Gmail berhasil dicek.");
 
-    console.log("📧 Memulai Gmail Listener...");
-    await startGmailListener();
+    // console.log("📧 Memulai Gmail Listener...");
+    // await startGmailListener();
+    
     console.log("🤖 Memulai Telegram Bot...");
     initTelegramBot();                    // ← PENTING: Ini harus dipanggil di awal
 
-    // console.log("📧 Memulai Outlook IMAP Listener...");
-    // startOutlookListener();
+    console.log("📧 Memulai Outlook IMAP Listener...");
+    startOutlookListener();
 
     console.log("📱 Memulai WhatsApp Connection...");
     whatsappSock = await connectWhatsApp();
+    
+    console.log("🔗 Memulai ClickUp Listener...");
+    startClickupListener();
 
     console.log("📱 Memulai Telegram Personal Account Listener (MTProto)...");
-    telegramUserClient = await startTelegramUserListener(); // ← Hanya minta OTP jika session belum ada
+    //telegramUserClient = await startTelegramUserListener(); // ← Hanya minta OTP jika session belum ada
+
 
     console.log("\n✅ Semua sistem berhasil dijalankan!");
     console.log("   • Telegram Bot (dengan Menu & AI)");

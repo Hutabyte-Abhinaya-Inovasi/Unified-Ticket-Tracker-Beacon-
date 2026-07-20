@@ -3,6 +3,7 @@
 import { createClient } from '@supabase/supabase-js';
 import WebSocket from 'ws';
 import { env } from '../config/env.js';
+import { createClickUpTask } from "../infrastructure/clickup/clickupService.js";
 
 // Polyfill WebSocket untuk Node.js < 22 agar Supabase Realtime berfungsi
 globalThis.WebSocket = WebSocket;
@@ -14,6 +15,21 @@ export const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_KEY, {
     autoRefreshToken: false,
   },
 });
+
+export async function isEmailProcessed(emailId) {
+
+    const { data, error } = await supabase
+        .from("intake_message")
+        .select("id")
+        .eq("message_id", emailId)
+        .limit(1);
+
+    if (error) {
+        throw error;
+    }
+
+    return data.length > 0;
+}
 
 // ====================== TICKET ID GENERATOR ======================
 /**
@@ -98,6 +114,8 @@ export async function saveEmailLog(email, analysis = {}, telegramSent = false, t
       console.error("Payload:", payload);
       return null;
     }
+
+    await createClickUpTask(payload);
 
     console.log(`✅ Ticket berhasil disimpan: ${ticketId}`);
     return ticketId;

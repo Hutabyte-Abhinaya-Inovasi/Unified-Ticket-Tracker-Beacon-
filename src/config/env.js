@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 
 dotenv.config();
+console.log("process.env.EMAIL_SECURE =", process.env.EMAIL_SECURE);
 
 export const env = {
   TG_TOKEN: process.env.TG_TOKEN,
@@ -15,7 +16,15 @@ export const env = {
   TG_API_HASH: process.env.TG_API_HASH || null,
   TG_PHONE_NUMBER: process.env.TG_PHONE_NUMBER || null,
   TG_2FA_PASSWORD: process.env.TG_2FA_PASSWORD || null,
-};
+
+  EMAIL_HOST: process.env.EMAIL_HOST,
+  EMAIL_PORT: process.env.EMAIL_PORT
+    ? parseInt(process.env.EMAIL_PORT, 10)
+    : 993,
+  EMAIL_USER: process.env.EMAIL_USER,
+  EMAIL_PASS: process.env.EMAIL_PASS,
+  EMAIL_SECURE: process.env.EMAIL_SECURE === "true",
+  };
 
 if (!env.TG_TOKEN) {
   throw new Error("TG_TOKEN belum di set di file .env");
