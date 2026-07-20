@@ -6,6 +6,7 @@ import "dotenv/config";
 import { connectWhatsApp } from "./infrastructure/whatsapp/whatsappService.js";
 import { initTelegramBot } from "./infrastructure/telegram/telegramService.js";
 import { startTelegramUserListener } from "./infrastructure/telegram/telegramUserListener.js";
+import { startSlaWorker } from "./infrastructure/telegram/slaWorker.js";
 import { startOutlookListener } from "./infrastructure/outlook/outlookService.js"; 
 
 console.log("🚀 Unified Incident Intake System");
@@ -17,8 +18,11 @@ let stopEmailListener   = null;
 
 async function start() {
   try {
-    console.log("🤖 Memulai Telegram Bot...");
-    initTelegramBot();                    // ← PENTING: Ini harus dipanggil di awal
+    console.log("Memulai Telegram Bot...");
+    initTelegramBot();
+
+    console.log("Memulai SLA Worker...");
+    startSlaWorker();
 
     // console.log("📧 Memulai Outlook IMAP Listener...");
     // startOutlookListener();

@@ -5,6 +5,9 @@ import { client, AI_MODEL, callOpenAIChatCompletion, cleanJSON } from "./aiClien
 import { runPipeline } from "./pipeline/runPipeline.js";
 
 const MAX_RETRY = 5;
+const DEFAULT_QUERY_ROWS = 10;
+const MAX_QUERY_ROWS = 50;
+
 
 // ==================== TOOLS DEFINITION ====================
 const tools = [
