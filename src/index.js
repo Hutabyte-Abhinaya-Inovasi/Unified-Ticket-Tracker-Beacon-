@@ -25,8 +25,9 @@ async function start() {
     // await forwardUnreadEmail(auth);
     // console.log("✅ Gmail berhasil dicek.");
 
-    console.log("📧 Memulai Gmail Listener...");
-    await startGmailListener();
+    // Dinonaktifkan sementara untuk mencegah crash karena file credentials.json tidak ada.
+    // console.log("📧 Memulai Gmail Listener...");
+    // await startGmailListener();
     console.log("🤖 Memulai Telegram Bot...");
     initTelegramBot();                    // ← PENTING: Ini harus dipanggil di awal
 
