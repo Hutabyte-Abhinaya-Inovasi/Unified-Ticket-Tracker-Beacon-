@@ -969,17 +969,28 @@ async function handleDraftPublish(query, chatId, ticketId) {
   }
 }
 
-// -- Konfirmasi tiket: L1 klik "Ya, Buat Tiket" di Beacon --
+// -- Konfirmasi tiket: L1 klik "✅ Ini Tiket" di Beacon --
 async function handleTicketConfirm(query, chatId, ticketId) {
   try {
     await updateTicket(ticketId, { status: 'In Progress', confirmed_at: new Date().toISOString() });
 
     const ticket = await getTicketById(ticketId);
     if (ticket) {
-      await bot.editMessageText(
-        createFormalTicket({ ...ticket, status: 'In Progress' }, { severity: ticket.priority, category: ticket.category }),
-        { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
-      ).catch(() => { });
+      // Edit pesan kandidat → tampilkan format TIKET DIKONFIRMASI + tombol Edit & Eskalasi
+      const confirmedText = formatConfirmedTicketMessage({ ...ticket, status: 'In Progress' });
+      await bot.editMessageText(confirmedText, {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '✏️ Edit Tiket', callback_data: `edit_beacon_ticket_${ticketId}` },
+              { text: '⬆️ Eskalasi', callback_data: `escalate_ticket_${ticketId}` },
+            ]
+          ]
+        }
+      }).catch(() => { });
 
       // Push ke ClickUp
       try {
@@ -988,7 +999,7 @@ async function handleTicketConfirm(query, chatId, ticketId) {
       } catch (_) { }
     }
 
-    await bot.answerCallbackQuery(query.id, { text: `Tiket ${ticketId} dikonfirmasi. Timer SLA mulai berjalan.`, show_alert: true });
+    await bot.answerCallbackQuery(query.id, { text: `✅ Tiket ${ticketId} dikonfirmasi! Timer SLA mulai berjalan.`, show_alert: true });
     console.log(`[Confirm] Tiket ${ticketId} oleh ${query.from?.first_name || 'L1'}`);
   } catch (err) {
     console.error('handleTicketConfirm error:', err.message);
@@ -1061,23 +1072,50 @@ async function handleBeaconEscalate(query, chatId, ticketId) {
 
     const by = query.from?.first_name || query.from?.username || 'L1';
     const ticket = await getTicketById(ticketId);
+    const severity = (ticket?.priority || ticket?.severity || 'MEDIUM').toUpperCase();
+    const sevEmoji = { CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡', LOW: '🟢', EMERGENCY: '🔴' }[severity] || '⚪';
 
-    // Edit pesan di Beacon → tampilkan status eskalasi
+    // Edit keyboard dari pesan Beacon → hapus tombol
     await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
       chat_id: chatId,
       message_id: query.message.message_id
     }).catch(() => { });
 
+    // Kirim notifikasi eskalasi ke Beacon
     await bot.sendMessage(chatId,
-      `⬆️ <b>Tiket Dieskala!</b>\n\n` +
-      `🎫 Ticket ID: <code>${escapeHTML(ticketId)}</code>\n` +
-      `👤 Dieskalasi oleh: <b>${escapeHTML(by)}</b>\n` +
-      `📌 Status: <b>Escalated</b>\n\n` +
-      `<i>Tiket ini membutuhkan penanganan L2/L3 atau supervisor.</i>`,
+      `⬆️ <b>Tiket Dieskala ke Head / Service Lead!</b>\n\n` +
+      `🎫 Ticket ID  : <code>${escapeHTML(ticketId)}</code>\n` +
+      `${sevEmoji} Severity   : <b>${escapeHTML(severity)}</b>\n` +
+      `📌 Subjek     : ${escapeHTML(ticket?.subject || '-')}\n` +
+      `👤 Dieskalasi : <b>${escapeHTML(by)}</b>\n` +
+      `📊 Status     : <b>Escalated</b>\n\n` +
+      `<i>Tiket ini telah diteruskan ke Head / Service Lead untuk penanganan lebih lanjut.</i>`,
       { parse_mode: 'HTML', reply_to_message_id: query.message.message_id }
     ).catch(() => { });
 
-    await bot.answerCallbackQuery(query.id, { text: `Tiket ${ticketId} berhasil dieskala ke L2/Supervisor.`, show_alert: true });
+    // Notifikasi DM ke jeremy & fahrezy (jika env var tersedia)
+    const leads = [env.TG_JEREMY_ID, env.TG_FAHREZY_ID].filter(Boolean);
+    if (leads.length > 0) {
+      const leadMsg =
+        `⬆️ <b>ESKALASI TIKET — dari ${escapeHTML(by)}</b>\n\n` +
+        `🎫 Ticket ID  : <code>${escapeHTML(ticketId)}</code>\n` +
+        `${sevEmoji} Severity   : <b>${escapeHTML(severity)}</b>\n` +
+        `📌 Subjek     : ${escapeHTML(ticket?.subject || '-')}\n\n` +
+        `Tiket ini dieskalasi oleh <b>${escapeHTML(by)}</b> dan memerlukan penanganan Anda sebagai Head / Service Lead.`;
+
+      for (const leadId of leads) {
+        try {
+          await bot.sendMessage(leadId.trim(), leadMsg, { parse_mode: 'HTML' });
+          console.log(`[Escalate] Notif eskalasi terkirim ke lead ${leadId}`);
+        } catch (leadErr) {
+          console.warn(`[Escalate] Gagal kirim notif ke lead ${leadId}:`, leadErr.message);
+        }
+      }
+    } else {
+      console.warn('[Escalate] Tidak ada TG_JEREMY_ID / TG_FAHREZY_ID di .env — notif lead dilewati.');
+    }
+
+    await bot.answerCallbackQuery(query.id, { text: `Tiket ${ticketId} berhasil dieskala ke Head/Service Lead.`, show_alert: true });
     console.log(`[Escalate] Tiket ${ticketId} dieskala oleh ${by}`);
   } catch (err) {
     console.error('handleBeaconEscalate error:', err.message);
@@ -1325,62 +1363,133 @@ async function handleRepairPublish(query, chatId, userId, ticketId) {
   }
 }
 
-// ================== HELPER: KIRIM TIKET FINAL KE GRUP BEACON ==================
+// ================== HELPER: FORMAT PESAN KANDIDAT TIKET (untuk Beacon) ==================
+function formatCandidateTicketMessage(ticket) {
+  const channelMap = {
+    email: 'Email', telegram: 'Telegram – Grup',
+    telegram_manual: 'Telegram – Manual', telegram_personal: 'Telegram – Direct Message',
+    whatsapp: 'WhatsApp', wa_group: 'WhatsApp – Grup', wa_dm: 'WhatsApp – Direct Message',
+    telepon: 'Telepon', 'walk-in': 'Walk-in',
+  };
+  const channel = channelMap[(ticket.source || '').toLowerCase()] || (ticket.source || 'System');
+
+  const diterima = ticket.processed_at
+    ? new Date(ticket.processed_at).toLocaleString('id-ID', {
+        timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
+        year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+      })
+    : '-';
+
+  const severity = ticket.priority || ticket.severity || null;
+  const priority = ticket.priority || null;
+  const category = ticket.category || null;
+  const statusLabel = ticket.status || 'Draft';
+
+  const DIVIDER = '━━━━━━━━━━━━━━━━━━━━━';
+
+  return (
+    `📥 <b>KANDIDAT TIKET BARU</b>\n` +
+    `📅 Diterima    : ${escapeHTML(diterima)}\n` +
+    `📡 Channel     : ${escapeHTML(channel)}\n` +
+    `👤 Dari        : ${escapeHTML(ticket.from || '-')}\n` +
+    `📌 Subject     : ${escapeHTML(ticket.subject || '-')}\n` +
+    `${DIVIDER}\n` +
+    `🗂 Kategori    : ${escapeHTML(category || '-')}\n` +
+    `⚠️ Severity    : ${escapeHTML(severity ? severity.toUpperCase() : '-')}\n` +
+    `🟡 Priority    : ${escapeHTML(priority ? priority.toUpperCase() : '-')}\n` +
+    `🔄 Status      : ${escapeHTML(statusLabel)}\n` +
+    `${DIVIDER}\n` +
+    `🗒 Summary: ${escapeHTML(ticket.summary || '-')}\n` +
+    `📝 Isi Pesan: ${escapeHTML((ticket.body || '-').substring(0, 500))}` +
+    ((ticket.body || '').length > 500 ? '\n<i>...pesan terpotong</i>' : '') +
+    `\n\n<i>Apakah pesan ini merupakan tiket?</i>`
+  );
+}
+
+// ================== HELPER: FORMAT PESAN TIKET DIKONFIRMASI (setelah ✅) ==================
+function formatConfirmedTicketMessage(ticket) {
+  const channelMap = {
+    email: 'Email', telegram: 'Telegram – Grup',
+    telegram_manual: 'Telegram – Manual', telegram_personal: 'Telegram – Direct Message',
+    whatsapp: 'WhatsApp', wa_group: 'WhatsApp – Grup', wa_dm: 'WhatsApp – Direct Message',
+    telepon: 'Telepon', 'walk-in': 'Walk-in',
+  };
+  const channel = channelMap[(ticket.source || '').toLowerCase()] || (ticket.source || 'System');
+
+  const diterima = ticket.processed_at
+    ? new Date(ticket.processed_at).toLocaleString('id-ID', {
+        timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
+        year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+      })
+    : '-';
+
+  const severity = ticket.priority || ticket.severity || '-';
+  const category = ticket.category || '-';
+  const statusMap = {
+    'In Progress': '🔄 In Progress', 'Done': '✅ Resolved (Done)', 'Resolved': '✅ Resolved',
+    'Escalated': '⬆️ Escalated', 'Cancelled': '❌ Cancelled', 'Draft': '📝 Draft',
+    'Open': '⏳ Open',
+  };
+  const statusLabel = statusMap[ticket.status] || ticket.status || '🔄 In Progress';
+
+  const DIVIDER = '━━━━━━━━━━━━━━━━━━━━━';
+
+  return (
+    `✅ <b>TIKET DIKONFIRMASI</b>\n` +
+    `${DIVIDER}\n` +
+    `🎫 Ticket ID   : <code>${escapeHTML(ticket.ticket_id || '-')}</code>\n` +
+    `📅 Diterima    : ${escapeHTML(diterima)}\n` +
+    `📡 Channel     : ${escapeHTML(channel)}\n` +
+    `👤 Dari        : ${escapeHTML(ticket.from || '-')}\n` +
+    `📌 Subject     : ${escapeHTML(ticket.subject || '-')}\n` +
+    `${DIVIDER}\n` +
+    `🗂 Kategori    : ${escapeHTML(category)}\n` +
+    `⚠️ Severity    : ${escapeHTML(severity.toUpperCase())}\n` +
+    `🔄 Status      : ${escapeHTML(statusLabel)}\n` +
+    `${DIVIDER}\n` +
+    `🗒 Summary: ${escapeHTML(ticket.summary || '-')}\n` +
+    `📝 Isi Pesan: ${escapeHTML((ticket.body || '-').substring(0, 500))}` +
+    ((ticket.body || '').length > 500 ? '\n<i>...pesan terpotong</i>' : '') +
+    `\n\n<i>✅ Tiket dikonfirmasi. Timer SLA mulai berjalan.</i>`
+  );
+}
+
+// ================== HELPER: KIRIM KANDIDAT TIKET KE GRUP BEACON ==================
 async function sendFinalTicketToBeacon(ticket, beaconChatId, status = 'In Progress', isUpdate = false) {
   const botInstance = initTelegramBot();
 
-  const channelMap = {
-    email: 'EMAIL', telegram: 'TELEGRAM', telegram_manual: 'TELEGRAM (MANUAL)',
-    telegram_personal: 'TELEGRAM (DM)', whatsapp: 'WHATSAPP', wa_group: 'WHATSAPP GROUP',
-    wa_dm: 'WHATSAPP (DM)', telepon: 'TELEPON', 'walk-in': 'WALK-IN',
-  };
-  const channel = channelMap[(ticket.source || '').toLowerCase()] || (ticket.source || 'SYSTEM').toUpperCase();
-  const severity = (ticket.priority || ticket.severity || 'MEDIUM').toUpperCase();
+  // Untuk UPDATE tiket (repair/edit), gunakan format konfirmasi dengan tombol Edit & Eskalasi
+  // Untuk TIKET BARU, gunakan format KANDIDAT dengan tombol Ini Tiket & Bukan Tiket
+  let messageText;
+  let keyboard;
 
-  const createdAt = ticket.processed_at
-    ? new Date(ticket.processed_at).toLocaleString('id-ID', {
-      timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
-      year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
-    })
-    : '-';
-
-  const header = isUpdate ? '<b>UPDATE TIKET</b>' : '<b>TICKET FINAL BARU</b>';
-
-  const statusMap = {
-    'Open': 'Open / Pending Confirmation', 'Pending Confirmation': 'Open / Pending Confirmation',
-    'In Progress': 'In Progress', 'Done': 'Resolved (Done)', 'Resolved': 'Resolved',
-    'Escalated': 'Escalated', 'Cancelled': 'Cancelled', 'Draft': 'Draft',
-  };
-
-  const messageText =
-    `<b>CHANNEL: ${escapeHTML(channel)}</b>\n` +
-    `<b>Kategori:</b> ${escapeHTML(ticket.category || 'Incident Management')}\n` +
-    `<b>Severity:</b> ${escapeHTML(severity)}\n\n` +
-    `\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n` +
-    `${header}\n` +
-    `<b>Ticket ID :</b> <code>${escapeHTML(ticket.ticket_id)}</code>\n` +
-    `<b>Dibuat   :</b> ${escapeHTML(createdAt)}\n` +
-    `\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n` +
-    `<b>Dari     :</b> ${escapeHTML(ticket.from || '-')}\n` +
-    `<b>Subject  :</b> ${escapeHTML(ticket.subject || '-')}\n` +
-    `<b>Status   :</b> ${escapeHTML(statusMap[status] || status)}\n\n` +
-    `<b>Summary:</b>\n${escapeHTML(ticket.summary || '-')}\n\n` +
-    `<b>Isi Tiket:</b>\n${escapeHTML((ticket.body || '-').substring(0, 500))}${(ticket.body || '').length > 500 ? '\n<i>...terpotong</i>' : ''}`;
-
-  const keyboard = {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: '✅ Ya, Tiket', callback_data: `confirm_ticket_${ticket.ticket_id}` },
-          { text: '✏️ Edit Tiket', callback_data: `edit_beacon_ticket_${ticket.ticket_id}` },
-        ],
-        [
-          { text: '⬆️ Eskalasi', callback_data: `escalate_ticket_${ticket.ticket_id}` },
-          { text: '🚫 Abaikan', callback_data: `reject_ticket_${ticket.ticket_id}` },
+  if (isUpdate) {
+    // Re-publish setelah edit: tampilkan format dikonfirmasi + tombol edit/eskalasi
+    messageText = formatConfirmedTicketMessage({ ...ticket, status });
+    keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '✏️ Edit Tiket', callback_data: `edit_beacon_ticket_${ticket.ticket_id}` },
+            { text: '⬆️ Eskalasi', callback_data: `escalate_ticket_${ticket.ticket_id}` },
+          ]
         ]
-      ]
-    }
-  };
+      }
+    };
+  } else {
+    // Tiket baru: tampilkan sebagai KANDIDAT
+    messageText = formatCandidateTicketMessage({ ...ticket, status });
+    keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '✅ Ini Tiket', callback_data: `confirm_ticket_${ticket.ticket_id}` },
+            { text: '❌ Bukan Tiket', callback_data: `reject_ticket_${ticket.ticket_id}` },
+          ]
+        ]
+      }
+    };
+  }
 
   try {
     const sent = await botInstance.sendMessage(beaconChatId, messageText, {
@@ -1546,50 +1655,56 @@ function escapeHTML(text = '') {
     .replace(/>/g, '&gt;');
 }
 
-// ================== CREATE FORMAL TICKET ==================
+// ================== CREATE FORMAL TICKET (dipakai untuk status update di Telegram) ==================
+// Untuk tiket baru ke Beacon → pakai formatCandidateTicketMessage()
+// Fungsi ini dipakai untuk pesan update status (Done, Escalated, dll)
 function createFormalTicket(email, analysis = {}) {
   const now = email.created_at ? new Date(email.created_at)
     : email.processed_at ? new Date(email.processed_at) : new Date();
 
-  const waktu = now.toLocaleString('id-ID', {
+  const diterima = now.toLocaleString('id-ID', {
     timeZone: 'Asia/Jakarta',
     day: '2-digit', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit', hour12: false
   });
 
   const channelMap = {
-    email: 'EMAIL', telegram: 'TELEGRAM', telegram_group: 'TELEGRAM',
-    telegram_manual: 'TELEGRAM (MANUAL)', telegram_personal: 'TELEGRAM (DM)',
-    whatsapp: 'WHATSAPP', wa_group: 'WHATSAPP GROUP', wa_dm: 'WHATSAPP (DM)',
-    telepon: 'TELEPON', 'walk-in': 'WALK-IN',
+    email: 'Email', telegram: 'Telegram – Grup', telegram_group: 'Telegram – Grup',
+    telegram_manual: 'Telegram – Manual', telegram_personal: 'Telegram – Direct Message',
+    whatsapp: 'WhatsApp', wa_group: 'WhatsApp – Grup', wa_dm: 'WhatsApp – Direct Message',
+    telepon: 'Telepon', 'walk-in': 'Walk-in',
   };
-  const channel = channelMap[(email.source || '').toLowerCase()] || (email.source || 'SYSTEM').toUpperCase();
-  const severity = (analysis.severity || analysis.priority || email.priority || email.severity || 'MEDIUM').toUpperCase();
-  const category = analysis.category || email.category || 'Incident Management';
+  const channel = channelMap[(email.source || '').toLowerCase()] || (email.source || 'System');
+  const severity = (analysis.severity || analysis.priority || email.priority || email.severity || '-');
+  const category = analysis.category || email.category || '-';
   const summary = analysis.summary || email.summary || '-';
   const ticketId = email.id || email.ticket_id;
 
   const statusMap = {
-    'Open': 'Open / Pending Confirmation', 'Pending Confirmation': 'Open / Pending Confirmation',
-    'In Progress': 'In Progress', 'Done': 'Resolved (Done)', 'Resolved': 'Resolved',
-    'Escalated': 'Escalated', 'Cancelled': 'Cancelled', 'NoAction': 'No Action', 'Draft': 'Draft',
+    'Open': '⏳ Open', 'Pending Confirmation': '⏳ Pending Confirmation',
+    'In Progress': '🔄 In Progress', 'Done': '✅ Resolved (Done)', 'Resolved': '✅ Resolved',
+    'Escalated': '⬆️ Escalated', 'Cancelled': '❌ Cancelled', 'NoAction': '➖ No Action', 'Draft': '📝 Draft',
   };
-  const statusLabel = statusMap[email.status] || email.status || 'Open / Pending Confirmation';
+  const statusLabel = statusMap[email.status] || email.status || '⏳ Open';
+
+  const DIVIDER = '━━━━━━━━━━━━━━━━━━━━━';
 
   return (
-    `<b>CHANNEL: ${escapeHTML(channel)}</b>\n` +
-    `<b>Kategori:</b> ${escapeHTML(category)}\n` +
-    `<b>Severity:</b> ${escapeHTML(severity)}\n\n` +
-    `\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n` +
-    `<b>TICKET FINAL BARU</b>\n` +
-    `<b>Ticket ID :</b> <code>${escapeHTML(ticketId)}</code>\n` +
-    `<b>Dibuat   :</b> ${escapeHTML(waktu)}\n` +
-    `\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n` +
-    `<b>Dari     :</b> ${escapeHTML(email.from || '-')}\n` +
-    `<b>Subject  :</b> ${escapeHTML(email.subject || email.group_name || '-')}\n` +
-    `<b>Status   :</b> ${escapeHTML(statusLabel)}\n\n` +
-    `<b>Summary:</b>\n${escapeHTML(summary)}\n\n` +
-    `<b>Isi Tiket:</b>\n${escapeHTML(email.body || '-')}`
+    `✅ <b>TIKET DIKONFIRMASI</b>\n` +
+    `${DIVIDER}\n` +
+    `🎫 Ticket ID   : <code>${escapeHTML(ticketId || '-')}</code>\n` +
+    `📅 Diterima    : ${escapeHTML(diterima)}\n` +
+    `📡 Channel     : ${escapeHTML(channel)}\n` +
+    `👤 Dari        : ${escapeHTML(email.from || '-')}\n` +
+    `📌 Subject     : ${escapeHTML(email.subject || email.group_name || '-')}\n` +
+    `${DIVIDER}\n` +
+    `🗂 Kategori    : ${escapeHTML(category)}\n` +
+    `⚠️ Severity    : ${escapeHTML(severity ? severity.toUpperCase() : '-')}\n` +
+    `🔄 Status      : ${escapeHTML(statusLabel)}\n` +
+    `${DIVIDER}\n` +
+    `🗒 Summary: ${escapeHTML(summary)}\n` +
+    `📝 Isi Pesan: ${escapeHTML((email.body || '-').substring(0, 600))}` +
+    ((email.body || '').length > 600 ? '\n<i>...pesan terpotong</i>' : '')
   );
 }
 
@@ -1600,7 +1715,19 @@ async function sendIncidentAlert(email, analysis = {}, customMessage = null) {
   const BEACON_ID = (env.TG_BEACON_CHAT_ID || env.TG_CHAT_ID).trim();
 
   const activeAnalysis = analysis && Object.keys(analysis).length > 0 ? analysis : (email.analysis || {});
-  const messageText = customMessage || email.formalMessage || createFormalTicket(email, activeAnalysis);
+
+  // Gabungkan data email + analisis untuk kandidat tiket
+  const ticketForFormat = {
+    ...email,
+    priority: activeAnalysis.severity || activeAnalysis.priority || email.priority || email.severity,
+    category: activeAnalysis.category || email.category,
+    summary: activeAnalysis.summary || email.summary,
+    status: email.status || 'Draft',
+    ticket_id: email.ticket_id || email.id,
+  };
+
+  // customMessage override (jika ada), kalau tidak pakai format KANDIDAT TIKET BARU
+  const messageText = customMessage || email.formalMessage || formatCandidateTicketMessage(ticketForFormat);
 
   const severity = (activeAnalysis.severity || activeAnalysis.priority || 'medium').toLowerCase();
   const notifyLoud = ['emergency', 'critical', 'high'].includes(severity);
@@ -1610,16 +1737,13 @@ async function sendIncidentAlert(email, analysis = {}, customMessage = null) {
   let telegramChatId = null;
 
   try {
+    // Tombol awal KANDIDAT: hanya [✅ Ini Tiket] dan [❌ Bukan Tiket]
     const keyboard = {
       reply_markup: {
         inline_keyboard: [
           [
-            { text: '✅ Ya, Tiket', callback_data: `confirm_ticket_${ticketId}` },
-            { text: '✏️ Edit Tiket', callback_data: `edit_beacon_ticket_${ticketId}` },
-          ],
-          [
-            { text: '⬆️ Eskalasi', callback_data: `escalate_ticket_${ticketId}` },
-            { text: '🚫 Abaikan', callback_data: `reject_ticket_${ticketId}` },
+            { text: '✅ Ini Tiket', callback_data: `confirm_ticket_${ticketId}` },
+            { text: '❌ Bukan Tiket', callback_data: `reject_ticket_${ticketId}` },
           ]
         ]
       }
