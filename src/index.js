@@ -1,0 +1,103 @@
+// src/index.js
+
+// Load environment variables pertama kali
+import "dotenv/config";
+
+import { connectWhatsApp } from "./infrastructure/whatsapp/whatsappService.js";
+import { initTelegramBot } from "./infrastructure/telegram/telegramService.js";
+import { startTelegramUserListener } from "./infrastructure/telegram/telegramUserListener.js";
+import { startSlaWorker } from "./infrastructure/telegram/slaWorker.js";
+import { startImapEmailListener, stopImapEmailListener } from "./infrastructure/email/imapEmailService.js";
+
+console.log("🚀 Unified Incident Intake System");
+console.log("=====================================");
+
+let whatsappSock        = null;
+let telegramUserClient  = null;
+let emailListenerStarted = false;
+
+async function start() {
+  try {
+    console.log("Memulai Telegram Bot...");
+    initTelegramBot();
+
+    console.log("Memulai SLA Worker...");
+    startSlaWorker();
+
+    console.log("📧 Memulai IMAP Email Listener...");
+    emailListenerStarted = startImapEmailListener();
+
+    console.log("📱 Memulai WhatsApp Connection...");
+    whatsappSock = await connectWhatsApp();
+
+    console.log("📱 Memulai Telegram Personal Account Listener (MTProto)...");
+    telegramUserClient = await startTelegramUserListener(); // ← Hanya minta OTP jika session belum ada
+
+    console.log("\n✅ Semua sistem berhasil dijalankan!");
+    console.log("   • Telegram Bot (dengan Menu & AI)");
+    if (telegramUserClient) {
+      console.log("   • Telegram Personal DM Listener (MTProto)");
+    }
+    console.log("   • WhatsApp Listener");
+    if (emailListenerStarted) {
+      console.log("   • IMAP Email Listener");
+    }
+    
+    console.log("=====================================");
+
+    console.log("💡 Ketik /menu di Telegram untuk membuka menu utama");
+
+  } catch (err) {
+    console.error("❌ Gagal memulai sistem:", err.message);
+    console.error(err);
+    process.exit(1);
+  }
+}
+
+// ====================== GRACEFUL SHUTDOWN ======================
+process.on("SIGINT", async () => {
+  console.log("\n🛑 SIGINT diterima. Menutup sistem...");
+
+  try {
+    if (whatsappSock) {
+      console.log("📴 Menutup WhatsApp connection...");
+      whatsappSock.end();
+    }
+
+    if (telegramUserClient) {
+      console.log("📴 Menutup Telegram User connection...");
+      await telegramUserClient.disconnect().catch(() => {});
+    }
+
+    if (emailListenerStarted) {
+      console.log("📴 Menutup IMAP Email Listener...");
+      stopImapEmailListener();
+    }
+
+    // Telegram Bot tidak perlu disconnect manual karena polling akan ikut mati
+    console.log("👋 Semua service telah dihentikan.");
+  } catch (err) {
+    console.error("Error saat shutdown:", err.message);
+  }
+
+  process.exit(0);
+});
+
+process.on("SIGTERM", async () => {
+  console.log("\n🛑 SIGTERM diterima. Menutup sistem...");
+  if (emailListenerStarted) stopImapEmailListener();
+  process.exit(0);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("❌ Uncaught Exception:", err.message);
+  console.error(err);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
+});
+
+// Jalankan sistem
+start();
