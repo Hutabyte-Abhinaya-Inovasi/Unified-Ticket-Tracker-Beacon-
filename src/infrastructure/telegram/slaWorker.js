@@ -1,34 +1,51 @@
 // src/infrastructure/telegram/slaWorker.js
-// Cek tiket In Progress setiap 60 detik.
-// Alur SLA Beacon (per diagram supervisor):
-//   → Tiket dikonfirmasi → timer berjalan (default 15 menit untuk CRITICAL/HIGH)
-//   → WARN  : sisa waktu <= WARN_MINUTES_REMAINING (10 menit) → kirim alarm ke Beacon
-//   → ALERT : waktu habis (>= 100% limit)              → kirim INFORMASI URGENT ke Beacon
-//   → ESCALATE: jika sudah ALERT → update status tiket ke Escalated + notif ke Head/Service Lead
+// Cek tiket setiap 60 detik.
+// Alur SLA Beacon (dua looping):
+//
+// ── LOOPING 1: SLA KONFIRMASI (15 Menit) ──────────────────────────────────
+//   → Tiket baru masuk (Pending Confirmation) → intake_received_at di-set
+//   → WARN  : waktu tunggu >= 10 menit, belum dikonfirmasi → alarm ke Beacon
+//   → ALERT : waktu tunggu >= 15 menit, belum dikonfirmasi → alarm URGENT ke Beacon
+//
+// ── LOOPING 2: SLA PEKERJAAN (2 Jam / sesuai severity) ───────────────────
+//   → Tiket dikonfirmasi (In Progress) → confirmed_at di-set → timer berjalan
+//   → WARN  : sisa waktu <= WARN_MINUTES_REMAINING (10 menit) → alarm ke Beacon
+//   → ALERT : waktu habis (>= 100% limit) → INFORMASI URGENT ke Beacon + eskalasi
 
 import TelegramBot from 'node-telegram-bot-api';
 import { env } from '../../config/env.js';
-import { getTicketsNeedingSlaCheck, markSlaFlag, updateTicket } from '../../database/supabase.js';
+import {
+  getTicketsNeedingSlaCheck,
+  getTicketsNeedingConfirmationCheck,
+  markSlaFlag,
+  markSlaConfirmFlag,
+  updateTicket,
+} from '../../database/supabase.js';
 
-// Batas waktu SLA default per severity (dalam menit)
+// ── LOOPING 2: Batas waktu SLA Pekerjaan per severity (dalam menit) ──────
 const SLA_MINUTES = {
   CRITICAL: 15,
-  HIGH: 15,
-  MEDIUM: 30,
-  LOW: 120,
+  HIGH:     15,
+  MEDIUM:   30,
+  LOW:      120,  // default 2 jam untuk tiket normal
 };
 
-// Alarm WARN dikirim saat sisa waktu <= 10 menit (bukan rasio, tapi menit tersisa)
+// ── LOOPING 1: Batas waktu SLA Konfirmasi ────────────────────────────────
+const SLA_CONFIRM_MINUTES      = 15;  // batas konfirmasi 15 menit
+const SLA_CONFIRM_WARN_MINUTES = 10;  // warn saat sudah 10 menit belum dikonfirmasi
+
+// Peringatan SLA Pekerjaan dikirim saat sisa waktu <= 10 menit
 const WARN_MINUTES_REMAINING = 10;
-// Alarm ALERT dikirim saat elapsed >= 100% batas waktu
+// Alarm SLA Pekerjaan dikirim saat elapsed >= 100% batas waktu
 const ALERT_RATIO = 1.0;
 
 // Emoji severity
 const SEVERITY_EMOJI = {
-  CRITICAL: '🔴',
-  HIGH: '🟠',
-  MEDIUM: '🟡',
-  LOW: '🟢',
+  CRITICAL:  '🔴',
+  HIGH:      '🟠',
+  MEDIUM:    '🟡',
+  LOW:       '🟢',
+  EMERGENCY: '🔴',
 };
 
 let bot = null;
@@ -39,7 +56,7 @@ function getBot() {
 }
 
 /**
- * Kirim notifikasi ke Head/Service Lead (jeremy & fahrezy) saat eskalasi SLA.
+ * Kirim notifikasi ke Head/Service Lead (jeremy & fahrezy) saat eskalasi SLA Pekerjaan.
  * Menggunakan env: TG_JEREMY_ID dan TG_FAHREZY_ID
  */
 async function notifyHeadServiceLead(ticketId, severity, subject) {
@@ -72,21 +89,87 @@ async function notifyHeadServiceLead(ticketId, severity, subject) {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════
+// LOOPING 1: SLA KONFIRMASI — cek tiket Pending Confirmation (15 Menit)
+// ══════════════════════════════════════════════════════════════════
+async function checkSlaConfirmation() {
+  const BEACON_ID = (env.TG_BEACON_CHAT_ID || env.TG_CHAT_ID).trim();
+  const tickets = await getTicketsNeedingConfirmationCheck();
+
+  for (const t of tickets) {
+    const elapsedMin = (Date.now() - new Date(t.intake_received_at).getTime()) / 60000;
+    const sevEmoji   = SEVERITY_EMOJI[(t.priority || t.severity || 'MEDIUM').toUpperCase()] || '🟡';
+
+    const reachedAlert = elapsedMin >= SLA_CONFIRM_MINUTES;
+    const reachedWarn  = elapsedMin >= SLA_CONFIRM_WARN_MINUTES;
+
+    // ── ALERT: 15 menit habis, belum dikonfirmasi ──────────────────────────
+    if (reachedAlert) {
+      if (t.sla_confirm_alerted) continue; // sudah pernah dikirim
+
+      const alertText =
+        `🚨 <b>SLA KONFIRMASI HABIS — TIKET BELUM DIKONFIRMASI!</b>\n\n` +
+        `${sevEmoji} Severity  : <b>${(t.priority || t.severity || 'MEDIUM').toUpperCase()}</b>\n` +
+        `🎫 Ticket ID : <code>${t.ticket_id}</code>\n` +
+        `📌 Subjek    : ${t.subject || '-'}\n` +
+        `⏱ Waktu tunggu: <b>${Math.round(elapsedMin)} menit</b> (batas: ${SLA_CONFIRM_MINUTES} menit)\n\n` +
+        `⚠️ Tiket ini belum dikonfirmasi selama <b>${SLA_CONFIRM_MINUTES} menit</b>.\n` +
+        `Silakan segera tentukan apakah ini tiket atau bukan.\n\n` +
+        `<i>Cari tiket di grup dan tekan tombol [✅ Ini Tiket] atau [❌ Bukan Tiket].</i>`;
+
+      try {
+        await getBot().sendMessage(BEACON_ID, alertText, { parse_mode: 'HTML' });
+        await markSlaConfirmFlag(t.ticket_id, 'alert');
+        console.log(`[SLA-Konfirmasi] ALERT terkirim untuk tiket ${t.ticket_id} (${Math.round(elapsedMin)} menit belum dikonfirmasi)`);
+      } catch (err) {
+        console.error(`[SLA-Konfirmasi] Gagal kirim ALERT tiket ${t.ticket_id}:`, err.message);
+      }
+      continue;
+    }
+
+    // ── WARN: 10 menit, belum dikonfirmasi ──────────────────────────────────
+    if (reachedWarn) {
+      if (t.sla_confirm_warned) continue; // sudah pernah dikirim
+
+      const sisaMin = Math.max(0, Math.round(SLA_CONFIRM_MINUTES - elapsedMin));
+      const warnText =
+        `⏰ <b>Peringatan SLA Konfirmasi — Sisa ${sisaMin} Menit!</b>\n\n` +
+        `${sevEmoji} Severity  : <b>${(t.priority || t.severity || 'MEDIUM').toUpperCase()}</b>\n` +
+        `🎫 Ticket ID : <code>${t.ticket_id}</code>\n` +
+        `📌 Subjek    : ${t.subject || '-'}\n` +
+        `⏳ Sudah menunggu: <b>${Math.round(elapsedMin)} menit</b>\n` +
+        `⏱ Sisa konfirmasi: <b>${sisaMin} menit lagi</b>\n\n` +
+        `Tiket ini belum dikonfirmasi. Mohon segera tentukan apakah ini tiket.`;
+
+      try {
+        await getBot().sendMessage(BEACON_ID, warnText, { parse_mode: 'HTML' });
+        await markSlaConfirmFlag(t.ticket_id, 'warn');
+        console.log(`[SLA-Konfirmasi] WARN terkirim untuk tiket ${t.ticket_id} (sisa ${sisaMin} menit)`);
+      } catch (err) {
+        console.error(`[SLA-Konfirmasi] Gagal kirim WARN tiket ${t.ticket_id}:`, err.message);
+      }
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// LOOPING 2: SLA PEKERJAAN — cek tiket In Progress (2 Jam / per severity)
+// ══════════════════════════════════════════════════════════════════
 async function checkSla() {
   const BEACON_ID = (env.TG_BEACON_CHAT_ID || env.TG_CHAT_ID).trim();
   const tickets = await getTicketsNeedingSlaCheck();
 
   for (const t of tickets) {
     const severityKey = (t.priority || t.severity || 'MEDIUM').toUpperCase();
-    const limitMin = t.sla_deadline_minutes || SLA_MINUTES[severityKey] || 30;
+    const limitMin = t.sla_deadline_minutes || SLA_MINUTES[severityKey] || 120;
     const elapsedMin = (Date.now() - new Date(t.confirmed_at).getTime()) / 60000;
     const sisaMenit = Math.max(0, Math.round(limitMin - elapsedMin));
     const sevEmoji = SEVERITY_EMOJI[severityKey] || '🟡';
 
     const reachedAlert = elapsedMin >= limitMin * ALERT_RATIO;
-    const reachedWarn = sisaMenit <= WARN_MINUTES_REMAINING; // sisa <= 10 menit
+    const reachedWarn  = sisaMenit <= WARN_MINUTES_REMAINING;
 
-    // ── ALERT: waktu habis → INFORMASI URGENT + eskalasi ──
+    // ── ALERT: waktu habis → INFORMASI URGENT + eskalasi ──────────────────
     if (reachedAlert) {
       if (t.sla_alerted) continue; // alert sudah terkirim sebelumnya
 
@@ -119,7 +202,7 @@ async function checkSla() {
       continue;
     }
 
-    // ── WARN: sisa ≤ 10 menit → kirim alarm ke Beacon ──
+    // ── WARN: sisa ≤ 10 menit → kirim alarm ke Beacon ──────────────────────
     if (reachedWarn) {
       if (t.sla_warned) continue; // warn sudah terkirim
 
@@ -143,11 +226,18 @@ async function checkSla() {
   }
 }
 
-// Jalankan pengecekan setiap 60 detik
+// Jalankan pengecekan setiap 60 detik (kedua looping)
 export function startSlaWorker() {
   console.log('[SLA] SLA Worker aktif (interval 60 detik)');
-  console.log(`[SLA] WARN saat sisa ≤ ${WARN_MINUTES_REMAINING} menit | ALERT + Eskalasi saat waktu habis`);
-  setInterval(() => checkSla().catch(err => console.error('[SLA] Error:', err.message)), 60_000);
+  console.log(`[SLA] LOOPING 1 — SLA Konfirmasi: WARN >= ${SLA_CONFIRM_WARN_MINUTES} menit | ALERT >= ${SLA_CONFIRM_MINUTES} menit`);
+  console.log(`[SLA] LOOPING 2 — SLA Pekerjaan : WARN sisa <= ${WARN_MINUTES_REMAINING} menit | ALERT saat waktu habis + Eskalasi`);
+
+  setInterval(() => {
+    checkSlaConfirmation().catch(err => console.error('[SLA-Konfirmasi] Error:', err.message));
+    checkSla().catch(err => console.error('[SLA] Error:', err.message));
+  }, 60_000);
+
   // Jalankan sekali langsung saat startup
+  checkSlaConfirmation().catch(() => { });
   checkSla().catch(() => { });
 }

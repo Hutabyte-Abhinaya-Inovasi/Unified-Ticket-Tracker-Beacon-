@@ -530,9 +530,21 @@ function initTelegramBot() {
         return;
       }
 
-      // -- Tolak tiket di Beacon --
+      // -- Tolak tiket di Beacon: tampilkan konfirmasi double-check --
       if (data.startsWith('reject_ticket_')) {
         await handleTicketReject(query, chatId, data.replace('reject_ticket_', ''));
+        return;
+      }
+
+      // -- Konfirmasi double-check: "Ya, Bukan Tiket" --
+      if (data.startsWith('confirm_reject_')) {
+        await handleConfirmReject(query, chatId, data.replace('confirm_reject_', ''));
+        return;
+      }
+
+      // -- Batal dari double-check: kembali ke tampilan kandidat --
+      if (data.startsWith('cancel_reject_')) {
+        await handleCancelReject(query, chatId, data.replace('cancel_reject_', ''));
         return;
       }
 
@@ -972,7 +984,13 @@ async function handleDraftPublish(query, chatId, ticketId) {
 // -- Konfirmasi tiket: L1 klik "✅ Ini Tiket" di Beacon --
 async function handleTicketConfirm(query, chatId, ticketId) {
   try {
-    await updateTicket(ticketId, { status: 'In Progress', confirmed_at: new Date().toISOString() });
+    const now = new Date().toISOString();
+    await updateTicket(ticketId, {
+      status: 'In Progress',
+      confirmed_at: now,
+      confirmed_by: query.from?.first_name || query.from?.username || 'L1',
+      sla_deadline_minutes: 120,   // SLA Pekerjaan default 2 Jam
+    });
 
     const ticket = await getTicketById(ticketId);
     if (ticket) {
@@ -992,6 +1010,25 @@ async function handleTicketConfirm(query, chatId, ticketId) {
         }
       }).catch(() => { });
 
+      // Kirim notifikasi SLA Pekerjaan mulai berjalan
+      const confirmedBy = query.from?.first_name || query.from?.username || 'Tim';
+      const confirmedTime = new Date(now).toLocaleString('id-ID', {
+        timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
+        year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+      });
+      await bot.sendMessage(chatId,
+        `✅ <b>TIKET DIKONFIRMASI — SLA Pekerjaan Dimulai</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━\n` +
+        `🎫 Ticket ID      : <code>${escapeHTML(ticketId)}</code>\n` +
+        `👤 Dikonfirmasi   : <b>${escapeHTML(confirmedBy)}</b>\n` +
+        `⏰ Waktu          : ${escapeHTML(confirmedTime)}\n` +
+        `⏱ SLA Pekerjaan  : <b>2 Jam (Sedang Berjalan)</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━\n` +
+        `📋 Status         : 🔄 In Progress\n` +
+        `🚀 Pesan berhasil diteruskan ke Unified Ticket Table & ClickUp.`,
+        { parse_mode: 'HTML' }
+      ).catch(() => { });
+
       // Push ke ClickUp
       try {
         const { handleL1Approve } = await import('../../usecases/processRawMessage.js');
@@ -999,7 +1036,7 @@ async function handleTicketConfirm(query, chatId, ticketId) {
       } catch (_) { }
     }
 
-    await bot.answerCallbackQuery(query.id, { text: `✅ Tiket ${ticketId} dikonfirmasi! Timer SLA mulai berjalan.`, show_alert: true });
+    await bot.answerCallbackQuery(query.id, { text: `✅ Tiket ${ticketId} dikonfirmasi! SLA Pekerjaan 2 Jam dimulai.`, show_alert: true });
     console.log(`[Confirm] Tiket ${ticketId} oleh ${query.from?.first_name || 'L1'}`);
   } catch (err) {
     console.error('handleTicketConfirm error:', err.message);
@@ -1007,22 +1044,91 @@ async function handleTicketConfirm(query, chatId, ticketId) {
   }
 }
 
-// -- Tolak tiket: L1 klik "Bukan Tiket / Abaikan" di Beacon --
+// -- Tolak tiket: L1 klik "❌ Bukan Tiket" di Beacon → tampilkan konfirmasi double-check --
 async function handleTicketReject(query, chatId, ticketId) {
   try {
-    await updateTicket(ticketId, { status: 'Cancelled' });
+    // Ambil subject tiket untuk konfirmasi
+    const ticket = await getTicketById(ticketId);
+    const subject = escapeHTML(ticket?.subject || ticket?.body?.substring(0, 60) || '-');
 
-    const by = query.from?.first_name || 'L1';
-    await bot.editMessageText(
-      `<b>Pesan diabaikan (bukan tiket)</b>\nTicket ID: <code>${escapeHTML(ticketId)}</code>\nDiabaikan oleh: ${escapeHTML(by)}`,
-      { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
-    ).catch(() => { });
+    // Tampilkan konfirmasi ulang (double-check) tanpa mengubah pesan asli
+    await bot.answerCallbackQuery(query.id, { text: '⚠️ Konfirmasi diperlukan', show_alert: false });
 
-    await bot.answerCallbackQuery(query.id, { text: `Tiket ${ticketId} diabaikan.`, show_alert: true });
-    console.log(`[Reject] Tiket ${ticketId} oleh ${by}`);
+    // Kirim pesan konfirmasi double-check sebagai reply
+    await bot.sendMessage(chatId,
+      `⚠️ <b>KONFIRMASI</b>\n\n` +
+      `Apakah pesan ini benar-benar bukan tiket?\n\n` +
+      `📌 Pesan:\n<i>${subject}</i>`,
+      {
+        parse_mode: 'HTML',
+        reply_to_message_id: query.message.message_id,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '✅ Ya, Bukan Tiket', callback_data: `confirm_reject_${ticketId}` },
+              { text: '↩️ Batal', callback_data: `cancel_reject_${ticketId}` },
+            ]
+          ]
+        }
+      }
+    );
+
+    console.log(`[Reject-DoubleCheck] Konfirmasi double-check ditampilkan untuk ${ticketId}`);
   } catch (err) {
     console.error('handleTicketReject error:', err.message);
     await bot.answerCallbackQuery(query.id, { text: 'Terjadi kesalahan. Coba lagi.', show_alert: true });
+  }
+}
+
+// -- Double-check: L1 klik "✅ Ya, Bukan Tiket" → set BUKAN TIKET --
+async function handleConfirmReject(query, chatId, ticketId) {
+  try {
+    const by = query.from?.first_name || query.from?.username || 'L1';
+    const now = new Date().toISOString();
+    const rejectedTime = new Date(now).toLocaleString('id-ID', {
+      timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
+      year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+
+    await updateTicket(ticketId, {
+      status: 'Cancelled',
+      rejected_by: by,
+      rejected_at: now,
+    });
+
+    // Edit pesan konfirmasi double-check → tampilkan hasil BUKAN TIKET
+    await bot.editMessageText(
+      `❌ <b>BUKAN TIKET</b>\n\n` +
+      `🆔 Intake ID     : <code>${escapeHTML(ticketId)}</code>\n` +
+      `👤 Ditandai oleh : ${escapeHTML(by)}\n` +
+      `⏰ Waktu         : ${escapeHTML(rejectedTime)}\n\n` +
+      `ℹ️ Pesan tidak diteruskan ke Unified Ticket Table dan ClickUp.`,
+      {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [] }
+      }
+    ).catch(() => { });
+
+    await bot.answerCallbackQuery(query.id, { text: `Tiket ${ticketId} ditandai bukan tiket.`, show_alert: true });
+    console.log(`[Reject-Confirmed] Tiket ${ticketId} ditolak oleh ${by}`);
+  } catch (err) {
+    console.error('handleConfirmReject error:', err.message);
+    await bot.answerCallbackQuery(query.id, { text: 'Terjadi kesalahan. Coba lagi.', show_alert: true });
+  }
+}
+
+// -- Double-check: L1 klik "↩️ Batal" → hapus pesan konfirmasi, biarkan tiket tetap --
+async function handleCancelReject(query, chatId, ticketId) {
+  try {
+    // Hapus pesan double-check saja
+    await bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+    await bot.answerCallbackQuery(query.id, { text: 'Dibatalkan. Tiket tetap aktif.', show_alert: false });
+    console.log(`[Reject-Cancelled] Penolakan ${ticketId} dibatalkan`);
+  } catch (err) {
+    console.error('handleCancelReject error:', err.message);
+    await bot.answerCallbackQuery(query.id, { text: 'Terjadi kesalahan.', show_alert: true });
   }
 }
 
@@ -1383,24 +1489,29 @@ function formatCandidateTicketMessage(ticket) {
   const severity = ticket.priority || ticket.severity || null;
   const priority = ticket.priority || null;
   const category = ticket.category || null;
-  const statusLabel = ticket.status || 'Draft';
+  // Intake ID: gunakan ticket_id sebagai referensi (format TCK-YYYYMMDD-XXXX)
+  const intakeId = ticket.ticket_id || ticket.id || '-';
+  const statusLabel = 'Menunggu Konfirmasi (SLA: 15 Menit)';
 
   const DIVIDER = '━━━━━━━━━━━━━━━━━━━━━';
 
   return (
     `📥 <b>KANDIDAT TIKET BARU</b>\n` +
+    `${DIVIDER}\n` +
+    `🆔 Intake ID   : <code>${escapeHTML(intakeId)}</code>\n` +
     `📅 Diterima    : ${escapeHTML(diterima)}\n` +
+    `${DIVIDER}\n` +
     `📡 Channel     : ${escapeHTML(channel)}\n` +
     `👤 Dari        : ${escapeHTML(ticket.from || '-')}\n` +
     `📌 Subject     : ${escapeHTML(ticket.subject || '-')}\n` +
     `${DIVIDER}\n` +
-    `🗂 Kategori    : ${escapeHTML(category || '-')}\n` +
-    `⚠️ Severity    : ${escapeHTML(severity ? severity.toUpperCase() : '-')}\n` +
-    `🟡 Priority    : ${escapeHTML(priority ? priority.toUpperCase() : '-')}\n` +
-    `🔄 Status      : ${escapeHTML(statusLabel)}\n` +
+    `🗂 Kategori    : ${escapeHTML(category || 'Belum diisi')}\n` +
+    `⚠️ Severity    : ${escapeHTML(severity ? severity.toUpperCase() : 'Belum diisi')}\n` +
+    `🟡 Priority    : ${escapeHTML(priority ? priority.toUpperCase() : 'Belum diisi')}\n` +
+    `📋 Status      : ${escapeHTML(statusLabel)}\n` +
     `${DIVIDER}\n` +
-    `🗒 Summary: ${escapeHTML(ticket.summary || '-')}\n` +
-    `📝 Isi Pesan: ${escapeHTML((ticket.body || '-').substring(0, 500))}` +
+    `🗒 Ringkasan: ${escapeHTML(ticket.summary || '-')}\n\n` +
+    `💬 Pesan Asli:\n${escapeHTML((ticket.body || '-').substring(0, 500))}` +
     ((ticket.body || '').length > 500 ? '\n<i>...pesan terpotong</i>' : '') +
     `\n\n<i>Apakah pesan ini merupakan tiket?</i>`
   );
@@ -1711,8 +1822,8 @@ function createFormalTicket(email, analysis = {}) {
 // ================== SEND INCIDENT ALERT ==================
 async function sendIncidentAlert(email, analysis = {}, customMessage = null) {
   const botInstance = initTelegramBot();
-  // Semua alert dikirim ke Beacon Hutabyte
-  const BEACON_ID = (env.TG_BEACON_CHAT_ID || env.TG_CHAT_ID).trim();
+  // Mengirim kandidat tiket baru ke grup pre-konfirmasi & edit (TG_UTT_CHAT_ID = BTO -5546265953)
+  const BEACON_ID = (env.TG_UTT_CHAT_ID || env.TG_CHAT_ID).trim();
 
   const activeAnalysis = analysis && Object.keys(analysis).length > 0 ? analysis : (email.analysis || {});
 
@@ -1765,7 +1876,15 @@ async function sendIncidentAlert(email, analysis = {}, customMessage = null) {
   const dbChatId = email.group_id && telegramChatId
     ? `${telegramChatId}|${email.group_id}` : telegramChatId;
 
-  await saveEmailLog(email, activeAnalysis, !!telegramMessageId, telegramMessageId, dbChatId);
+  // Set intake_received_at = waktu notifikasi kandidat dikirim (start SLA Konfirmasi 15 Menit)
+  const intakeNow = new Date().toISOString();
+  await saveEmailLog(
+    { ...email, intake_received_at: intakeNow },
+    activeAnalysis,
+    !!telegramMessageId,
+    telegramMessageId,
+    dbChatId
+  );
 }
 
 // ====================== UPDATE TICKET STATUS AND SYNC MESSAGE ======================
