@@ -11,6 +11,7 @@ import { startOutlookListener } from "./infrastructure/outlook/outlookService.js
 // import { forwardUnreadEmail } from "./usecases/forwardUnreadEmail.js";
 import { startGmailListener } from "./infrastructure/gmail/gmailListener.js";
 import { startClickupListener } from "./infrastructure/clickup/clickupListener.js";
+import { startIntakeMessageListener } from "./usecases/intakeMessageListener.js";
 console.log("🚀 Unified Incident Intake System");
 console.log("=====================================");
 
@@ -27,13 +28,16 @@ async function start() {
 
     
     // Dinonaktifkan sementara untuk mencegah crash karena file credentials.json tidak ada.
-    // console.log("📧 Memulai Gmail Listener...");
-    // await startGmailListener();
+    console.log("📧 Memulai Gmail Listener...");
+    await startGmailListener();
     console.log("🤖 Memulai Telegram Bot...");
     initTelegramBot();                    // ← PENTING: Ini harus dipanggil di awal
 
     console.log("📧 Memulai Outlook IMAP Listener...");
     startOutlookListener();
+
+    console.log("📡 Memulai Intake Listener...");
+    startIntakeMessageListener();
 
     console.log("📱 Memulai WhatsApp Connection...");
     whatsappSock = await connectWhatsApp();

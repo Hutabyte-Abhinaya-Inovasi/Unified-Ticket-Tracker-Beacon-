@@ -73,7 +73,12 @@ function initTelegramBot() {
       console.error("❌ Telegram Bot Polling Error: 401 Unauthorized. Token bot di .env tidak valid atau expired. Polling dinonaktifkan.");
       bot.stopPolling();
     } else {
-      console.warn("⚠️ Telegram Bot Polling Error:", err.message);
+      console.log("===== TELEGRAM ERROR =====");
+    console.log(err);
+    console.log("code :", err.code);
+    console.log("message :", err.message);
+    console.log("response :", err.response?.body);
+    console.log("==========================");
     }
   });
 
