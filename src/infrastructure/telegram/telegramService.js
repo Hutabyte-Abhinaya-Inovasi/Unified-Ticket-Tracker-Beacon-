@@ -4,9 +4,12 @@ import TelegramBot from 'node-telegram-bot-api';
 import { env } from '../../config/env.js';
 import {
   saveEmailLog,
+  saveRawIntakeMessage,
   updateIncidentStatus,
   getTicketsByStatus,
   getTicketsByDateRange,
+  getTicketsByDate,
+  searchTickets,
   getDailySummary,
   getTicketById,
   updateTicket,
@@ -18,6 +21,7 @@ import {
   updateConversationLastMessage,
   closeConversationSessionByTicket
 } from '../../database/supabase.js';
+import { processRawMessage } from '../../usecases/processRawMessage.js';
 import {
   chatWithAI,
   analyzeEmail,
@@ -28,6 +32,7 @@ import {
 } from '../ai/openaiService.js';
 import {
   createSession,
+  createRepairSession,
   getSession,
   destroySession,
   updateSession,
@@ -35,7 +40,13 @@ import {
   isRequiredField,
   getFieldPrompt,
   formatSessionSummary,
+  formatRepairSummary,
+  formatDraftForUTT,
+  validateField,
+  ALL_FIELDS,
+  REPAIR_FIELDS,
   FIELD_LABELS,
+  DB_FIELD_LABELS,
   FIELD_QUESTIONS
 } from './manualTicketSession.js';
 
@@ -51,6 +62,10 @@ function initTelegramBot() {
   }
 
   const MAIN_CHAT_ID = env.TG_CHAT_ID.trim();
+  // Grup Beacon Hutabyte: tujuan tiket final
+  const BEACON_CHAT_ID = (env.TG_BEACON_CHAT_ID || '-5546265953').trim();
+  // Grup UTT: tempat pre-konfirmasi draft dan repair tiket
+  const UTT_CHAT_ID = (env.TG_UTT_CHAT_ID || '-1003753882093').trim();
 
   let ALLOWED_TELEGRAM_GROUPS = [];
   if (env.ALLOWED_TELEGRAM_GROUPS && env.ALLOWED_TELEGRAM_GROUPS.trim() !== '') {
@@ -155,6 +170,153 @@ function initTelegramBot() {
     }
   });
 
+  // Command: /get, /edit, /id <ticketId> eksplisit → Repair tiket langsung dari DB
+  bot.onText(/\/(?:get|edit|id)\s+(TCK-[\w-]+)/i, async (msg, match) => {
+    const chatId = msg.chat.id.toString();
+    const userId = msg.from?.id?.toString() || 'unknown';
+    const senderName = msg.from?.first_name || msg.from?.username || 'Unknown';
+    const ticketId = match[1].toUpperCase();
+
+    // Cek sesi aktif
+    const existingSession = getSession(chatId, userId);
+    if (existingSession) {
+      await bot.sendMessage(chatId,
+        '⚠️ Kamu masih punya sesi aktif. Selesaikan atau ketik /cancel terlebih dahulu.',
+        { reply_markup: { inline_keyboard: [[{ text: '❌ Batalkan Sesi', callback_data: 'manual_cancel' }]] } }
+      );
+      return;
+    }
+
+    const loadingMsg = await bot.sendMessage(chatId, `🔍 Mengambil data tiket <code>${escapeHTML(ticketId)}</code>...`, { parse_mode: 'HTML' });
+
+    try {
+      const ticket = await getTicketById(ticketId);
+      if (!ticket) {
+        await bot.editMessageText(
+          `❌ Tiket <code>${escapeHTML(ticketId)}</code> tidak ditemukan di database.`,
+          { chat_id: chatId, message_id: loadingMsg.message_id, parse_mode: 'HTML' }
+        );
+        return;
+      }
+
+      // Buat sesi REPAIR dari data DB
+      createRepairSession(chatId, userId, ticket, senderName);
+
+      await bot.deleteMessage(chatId, loadingMsg.message_id).catch(() => { });
+
+      // Tampilkan repair summary dengan tombol edit
+      const session = getSession(chatId, userId);
+      const { text, keyboard } = formatRepairSummary(session);
+      await bot.sendMessage(chatId, text, { parse_mode: 'HTML', ...keyboard });
+
+    } catch (err) {
+      console.error('❌ /get handler error:', err.message);
+      await bot.editMessageText(
+        '❌ Gagal mengambil data tiket. Coba lagi.',
+        { chat_id: chatId, message_id: loadingMsg.message_id }
+      ).catch(() => { });
+    }
+  });
+
+  // Command: /edit <keyword bebas> → Cari & tampilkan list tiket untuk dipilih
+  // Dipasang SETELAH handler TCK eksplisit supaya tidak clash
+  bot.onText(/\/(?:get|edit|id)\s+(?!TCK-)(.+)/i, async (msg, match) => {
+    const chatId = msg.chat.id.toString();
+    const userId = msg.from?.id?.toString() || 'unknown';
+    const keyword = match[1].trim();
+
+    // Cek sesi aktif
+    const existingSession = getSession(chatId, userId);
+    if (existingSession) {
+      await bot.sendMessage(chatId,
+        '⚠️ Kamu masih punya sesi aktif. Selesaikan atau ketik /cancel terlebih dahulu.',
+        { reply_markup: { inline_keyboard: [[{ text: '❌ Batalkan Sesi', callback_data: 'manual_cancel' }]] } }
+      );
+      return;
+    }
+
+    const loadingMsg = await bot.sendMessage(chatId, `🔍 Mencari tiket: <i>${escapeHTML(keyword)}</i>...`, { parse_mode: 'HTML' });
+
+    try {
+      let tickets = [];
+      let queryLabel = keyword;
+
+      // Deteksi kata kunci waktu (WIB)
+      const kwLower = keyword.toLowerCase().trim();
+      const todayWib = new Date(new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Jakarta' }));
+      const todayStr = todayWib.toISOString().split('T')[0]; // YYYY-MM-DD
+
+      const yesterdayWib = new Date(todayWib);
+      yesterdayWib.setDate(yesterdayWib.getDate() - 1);
+      const yesterdayStr = yesterdayWib.toISOString().split('T')[0];
+
+      if (kwLower.includes('hari ini') || kwLower === 'today') {
+        tickets = await getTicketsByDate(todayStr);
+        queryLabel = `hari ini (${todayStr})`;
+      } else if (kwLower.includes('kemarin') || kwLower === 'yesterday') {
+        tickets = await getTicketsByDate(yesterdayStr);
+        queryLabel = `kemarin (${yesterdayStr})`;
+      } else {
+        // Full-text search keyword
+        tickets = await searchTickets(keyword);
+        queryLabel = `"${keyword}"`;
+      }
+
+      await bot.deleteMessage(chatId, loadingMsg.message_id).catch(() => { });
+
+      if (!tickets || tickets.length === 0) {
+        await bot.sendMessage(chatId,
+          `🔍 Tidak ada tiket ditemukan untuk: <i>${escapeHTML(queryLabel)}</i>\n\n` +
+          `Coba kata kunci lain, atau gunakan:\n` +
+          `• <code>/edit hari ini</code>\n• <code>/edit kemarin</code>\n• <code>/edit TCK-YYYYMMDD-XXXX</code>`,
+          { parse_mode: 'HTML' }
+        );
+        return;
+      }
+
+      // Batasi 8 tiket untuk efisiensi tampilan
+      const displayTickets = tickets.slice(0, 8);
+
+      // Peta prioritas → emoji
+      const priorityEmoji = { CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡', LOW: '🟢' };
+      const statusShort = {
+        'In Progress': '⚙️',
+        'Done': '✅',
+        'Resolved': '✅',
+        'Pending Confirmation': '⏳',
+        'Cancelled': '❌',
+        'Logged (No Action)': '📋',
+      };
+
+      // Susun teks header ringkas
+      let headerText = `🔍 <b>Hasil: ${escapeHTML(queryLabel)}</b> — ${displayTickets.length} tiket`;
+      if (tickets.length > 8) headerText += ` (dari ${tickets.length})`;
+      headerText += '\n\nPilih tiket yang ingin diedit 👇';
+
+      // Buat inline keyboard — 1 tombol per baris
+      const inline_keyboard = displayTickets.map(t => {
+        const prio = priorityEmoji[(t.priority || 'MEDIUM').toUpperCase()] || '🟡';
+        const stat = statusShort[t.status] || '📄';
+        const label = (t.subject || t.summary || 'Tanpa judul').substring(0, 50);
+        const shortId = t.ticket_id.split('-').slice(-1)[0]; // ambil seq number saja, e.g. 0001
+        const btnText = `${prio} ${stat} ${t.ticket_id.replace('TCK-', '')} · ${label}`;
+        return [{ text: btnText.substring(0, 64), callback_data: `select_ticket_${t.ticket_id}` }];
+      });
+
+      await bot.sendMessage(chatId, headerText, {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard }
+      });
+
+    } catch (err) {
+      console.error('❌ /edit keyword handler error:', err.message);
+      await bot.editMessageText(
+        '❌ Gagal mencari tiket. Coba lagi.',
+        { chat_id: chatId, message_id: loadingMsg.message_id }
+      ).catch(() => { });
+    }
+  });
+
   // ─────── MESSAGE HANDLER ───────
   bot.on('message', async (msg) => {
     // Debugging sementara untuk melihat semua pesan masuk
@@ -193,106 +355,41 @@ function initTelegramBot() {
       console.log(`From   : ${sender}`);
       console.log(`Text   : ${msg.text.substring(0, 100)}${msg.text.length > 100 ? '...' : ''}`);
 
-      const quotedMessageId = msg.reply_to_message ? msg.reply_to_message.message_id.toString() : null;
-      const groupSubject = `Laporan dari ${groupName}`;
+      // Simpan ke tabel intake_message terlebih dahulu
+      const raw = await saveRawIntakeMessage({
+        source_channel: 'telegram',
+        source_ref: chatId.toString(),
+        sender: `${sender} (${userId})`,
+        thread_ref: msg.reply_to_message?.message_id ? `tg_grp_${msg.reply_to_message.message_id}` : null,
+        received_at: new Date(Number(msg.date || Date.now() / 1000) * 1000).toISOString(),
+        body_text: msg.text,
+        attachments: null,
+        raw_payload: {
+          group_name: groupName,
+          telegram_msg_id: msg.message_id,
+          sender_id: userId,
+          push_name: sender,
+        },
+        idempotency_key: `tg_grp_${msg.message_id}`,
+      }).catch(err => {
+        console.warn('⚠️ Gagal simpan raw message Telegram group, proses tetap lanjut:', err.message);
+        return null;
+      });
 
-      let parentTicket = null;
-
-      // 1. Jika me-reply pesan lama secara langsung (quote)
-      if (quotedMessageId) {
-        parentTicket = await findActiveTicketForThreading(chatId, groupSubject, quotedMessageId, 'telegram_group');
-      } else {
-        // 2. Jika pesan biasa, ambil semua tiket yang sedang aktif di grup ini
-        const activeTickets = await findActiveTicketsForGroup(chatId, 'telegram_group');
-
-        if (activeTickets.length === 1) {
-          // Jika hanya ada 1 tiket aktif, lakukan pencocokan relevansi standar
-          const isShort = msg.text.length < 20;
-          const replyKeywords = ["baik", "oke", "ok", "siap", "tenggat", "kapan", "aman", "done", "proses", "sudah", "terima kasih", "thanks", "tolong", "perbaiki", "yah", "ini"];
-          const hasReplyKeyword = replyKeywords.some(k => msg.text.toLowerCase().trim() === k);
-
-          if (isShort && hasReplyKeyword) {
-            parentTicket = activeTickets[0];
-          } else {
-            const isRelated = await checkMessageRelevance(msg.text, activeTickets[0].body, activeTickets[0].summary);
-            if (isRelated) {
-              parentTicket = activeTickets[0];
-            }
-          }
-        } else if (activeTickets.length > 1) {
-          // Jika ada beberapa tiket aktif sekaligus, gunakan AI routing
-          const isShort = msg.text.length < 20;
-          const replyKeywords = ["baik", "oke", "ok", "siap", "tenggat", "kapan", "aman", "done", "proses", "sudah", "terima kasih", "thanks", "tolong", "perbaiki", "yah", "ini"];
-          const hasReplyKeyword = replyKeywords.some(k => msg.text.toLowerCase().trim() === k);
-
-          if (isShort && hasReplyKeyword) {
-            // Sebagai heuristik, hubungkan ke tiket aktif paling terakhir diperbarui
-            parentTicket = activeTickets[0];
-          } else {
-            const matchedTicketId = await routeMessageToActiveTickets(msg.text, activeTickets);
-            if (matchedTicketId) {
-              parentTicket = activeTickets.find(t => t.ticket_id === matchedTicketId) || null;
-            }
-          }
-        }
-      }
-
-      if (parentTicket) {
-        console.log(`💬 Threading Telegram: Menambahkan balasan dari ${sender} ke tiket aktif ${parentTicket.ticket_id}`);
-        
-        // 1. Simpan/append ke body di database
-        await appendMessageToTicket(parentTicket.ticket_id, parentTicket.body, sender, msg.text);
-
-        // Update data sesi conversation agar menunjuk ke tiket ini
-        await createConversationSession('telegram_group', chatId, parentTicket.ticket_id, msg.text, parentTicket.summary);
-
-        // 2. Teruskan balasan ke Telegram utama (reply ke alert sebelumnya)
-        if (parentTicket.telegram_chat_id && parentTicket.telegram_message_id) {
-          try {
-            const targetChatId = parentTicket.telegram_chat_id.split('|')[0];
-            const replyText = `💬 <b>Balasan dari ${sender} (Telegram Group - Ticket ${parentTicket.ticket_id})</b>:\n\n${msg.text}`;
-            await bot.sendMessage(targetChatId, replyText, {
-              parse_mode: "HTML",
-              reply_to_message_id: parseInt(parentTicket.telegram_message_id, 10)
-            });
-            console.log(`✅ Balasan berhasil diteruskan ke Telegram Utama (reply_to_message_id: ${parentTicket.telegram_message_id})`);
-          } catch (tgErr) {
-            console.error("⚠️ Gagal meneruskan balasan ke Telegram Utama:", tgErr.message);
-          }
-        }
-
-        // 3. Cek apakah balasan ini menyatakan perubahan status (Done, Escalated, Cancelled)
-        try {
-          const detectedStatus = await detectStatusChangeFromReply(msg.text);
-          if (detectedStatus && detectedStatus !== 'no_change') {
-            await updateIncidentStatusAndMessage(parentTicket.ticket_id, detectedStatus, true);
-          }
-        } catch (statusErr) {
-          console.error("⚠️ Gagal memproses deteksi status otomatis dari balasan Telegram:", statusErr.message);
-        }
-
-        return; // Hentikan alur, jangan buat tiket baru!
-      }
-
-      // === BUKAN FOLLOW-UP: BUAT TIKET BARU ===
-      const ticketId = await generateTicketId();
-      const pseudoEmail = {
-        id: ticketId,
-        messageId: msg.message_id.toString(), // Actual Telegram message ID
-        from: `${sender}`,
-        subject: `Laporan dari ${groupName}`,
-        body: msg.text,
-        source: "telegram_group",
-        group_name: groupName,
-        group_id: chatId
-      };
-
-      const analysis = await analyzeEmail(pseudoEmail);
-
-      await sendIncidentAlert(pseudoEmail, analysis);
-
-      // Buat sesi conversation baru di database
-      await createConversationSession('telegram_group', chatId, pseudoEmail.id, msg.text, analysis?.summary || null);
+      // Proses melalui pipeline utama
+      await processRawMessage({
+        ...(raw || {}),
+        id: raw?.id || null,
+        source_channel: 'telegram',
+        source_ref: chatId.toString(),
+        sender: `${sender} (${userId})`,
+        body_text: msg.text,
+        raw_payload: {
+          group_name: groupName,
+          telegram_msg_id: msg.message_id,
+        },
+        idempotency_key: `tg_grp_${msg.message_id}`,
+      });
       return;
     }
 
@@ -304,11 +401,11 @@ function initTelegramBot() {
   bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const userId = query.from?.id?.toString() || 'unknown';
-    
+
     // Jangan panggil answerCallbackQuery di awal jika data berupa update status,
     // karena handleStatusChange akan memanggil answerCallbackQuery dengan toast kustom.
     if (!query.data?.startsWith('status_')) {
-      await bot.answerCallbackQuery(query.id).catch(() => {});
+      await bot.answerCallbackQuery(query.id).catch(() => { });
     }
 
     const data = query.data;
@@ -371,6 +468,12 @@ function initTelegramBot() {
         return;
       }
 
+      // ── Callback edit field (prefix: edit_field_) ──
+      if (data.startsWith('edit_field_')) {
+        await handleEditFieldCallback(query, chatId, userId, data);
+        return;
+      }
+
       // ── Konfirmasi simpan tiket ──
       if (data === 'manual_confirm') {
         await handleManualConfirm(query, chatId, userId);
@@ -380,10 +483,143 @@ function initTelegramBot() {
       // ── Batalkan sesi manual input ──
       if (data === 'manual_cancel') {
         destroySession(chatId.toString(), userId);
-        await bot.editMessageText(
-          '❌ Sesi input tiket dibatalkan.',
-          { chat_id: chatId, message_id: query.message.message_id }
+        try {
+          await bot.editMessageText(
+            '❌ Sesi input tiket dibatalkan.',
+            { chat_id: chatId, message_id: query.message.message_id }
+          );
+        } catch (_) {
+          await bot.sendMessage(chatId, '❌ Sesi input tiket dibatalkan.');
+        }
+        return;
+      }
+
+      // ── Draft: Fix & Publish ke Beacon (callback: draft_publish_<ticketId>) ──
+      if (data.startsWith('draft_publish_')) {
+        const ticketId = data.replace('draft_publish_', '');
+        await handleDraftPublish(query, chatId, ticketId);
+        return;
+      }
+
+      // ── Draft: Masih ada perubahan → buka repair (callback: draft_edit_<ticketId>) ──
+      if (data.startsWith('draft_edit_')) {
+        const ticketId = data.replace('draft_edit_', '');
+        await handleDraftEdit(query, chatId, userId);
+        return;
+      }
+
+      // ── Draft: Batalkan draft (callback: draft_cancel_<ticketId>) ──
+      if (data.startsWith('draft_cancel_')) {
+        const ticketId = data.replace('draft_cancel_', '');
+        await handleDraftCancel(query, chatId, ticketId);
+        return;
+      }
+
+      // ── Repair: Edit field tiket (callback: repair_edit_<field>_<ticketId>) ──
+      if (data.startsWith('repair_edit_')) {
+        await handleRepairEditCallback(query, chatId, userId, data);
+        return;
+      }
+
+      // ── Repair: Publish update ke Beacon (callback: repair_publish_<ticketId>) ──
+      if (data.startsWith('repair_publish_')) {
+        const ticketId = data.replace('repair_publish_', '');
+        await handleRepairPublish(query, chatId, userId, ticketId);
+        return;
+      }
+
+      // -- Repair followup options (prefix: rq_) --
+      if (data.startsWith('rq_')) {
+        await handleRepairFollowUpCallback(query, chatId, userId, data);
+        return;
+      }
+
+      // -- Konfirmasi tiket di Beacon --
+      if (data.startsWith('confirm_ticket_')) {
+        await handleTicketConfirm(query, chatId, data.replace('confirm_ticket_', ''));
+        return;
+      }
+
+      // -- Tolak tiket di Beacon: tampilkan konfirmasi double-check --
+      if (data.startsWith('reject_ticket_')) {
+        await handleTicketReject(query, chatId, data.replace('reject_ticket_', ''));
+        return;
+      }
+
+      // -- Konfirmasi double-check: "Ya, Bukan Tiket" --
+      if (data.startsWith('confirm_reject_')) {
+        await handleConfirmReject(query, chatId, data.replace('confirm_reject_', ''));
+        return;
+      }
+
+      // -- Batal dari double-check: kembali ke tampilan kandidat --
+      if (data.startsWith('cancel_reject_')) {
+        await handleCancelReject(query, chatId, data.replace('cancel_reject_', ''));
+        return;
+      }
+
+      // -- Edit tiket dari Beacon --
+      if (data.startsWith('edit_beacon_ticket_')) {
+        await handleBeaconEditTicket(query, chatId, data.replace('edit_beacon_ticket_', ''));
+        return;
+      }
+
+      // -- Eskalasi tiket dari Beacon --
+      if (data.startsWith('escalate_ticket_')) {
+        await handleBeaconEscalate(query, chatId, data.replace('escalate_ticket_', ''));
+        return;
+      }
+
+      // ── Pilih tiket dari hasil pencarian /edit keyword (prefix: select_ticket_) ──
+      if (data.startsWith('select_ticket_')) {
+        const ticketId = data.replace('select_ticket_', '');
+        const senderName = query.from?.first_name || query.from?.username || 'Unknown';
+
+        // Cek sesi aktif
+        const existingSession = getSession(chatId.toString(), userId);
+        if (existingSession) {
+          await bot.sendMessage(chatId,
+            '⚠️ Kamu masih punya sesi aktif. Selesaikan atau ketik /cancel terlebih dahulu.',
+            { reply_markup: { inline_keyboard: [[{ text: '❌ Batalkan Sesi', callback_data: 'manual_cancel' }]] } }
+          );
+          return;
+        }
+
+        // Edit pesan list → tampilkan loading
+        await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+          chat_id: chatId,
+          message_id: query.message.message_id
+        }).catch(() => { });
+
+        const loadingMsg = await bot.sendMessage(chatId,
+          `🔍 Membuka tiket <code>${escapeHTML(ticketId)}</code>...`,
+          { parse_mode: 'HTML' }
         );
+
+        try {
+          const ticket = await getTicketById(ticketId);
+          if (!ticket) {
+            await bot.editMessageText(
+              `❌ Tiket <code>${escapeHTML(ticketId)}</code> tidak ditemukan.`,
+              { chat_id: chatId, message_id: loadingMsg.message_id, parse_mode: 'HTML' }
+            );
+            return;
+          }
+
+          createRepairSession(chatId.toString(), userId, ticket, senderName);
+          await bot.deleteMessage(chatId, loadingMsg.message_id).catch(() => { });
+
+          const session = getSession(chatId.toString(), userId);
+          const { text: repairText, keyboard: repairKeyboard } = formatRepairSummary(session);
+          await bot.sendMessage(chatId, repairText, { parse_mode: 'HTML', ...repairKeyboard });
+
+        } catch (err) {
+          console.error('❌ select_ticket_ callback error:', err.message);
+          await bot.editMessageText(
+            '❌ Gagal membuka tiket. Coba lagi.',
+            { chat_id: chatId, message_id: loadingMsg.message_id }
+          ).catch(() => { });
+        }
         return;
       }
 
@@ -420,7 +656,7 @@ async function handleSessionMessage(msg, session, chatId, userId) {
       session.pendingFields = pending;
 
       // Hapus pesan loading
-      await bot.deleteMessage(chatId, loadingMsg.message_id).catch(() => {});
+      await bot.deleteMessage(chatId, loadingMsg.message_id).catch(() => { });
 
       // Tampilkan hasil ekstraksi ke user
       const extractedSummary = buildExtractionSummary(session.data, extracted);
@@ -440,7 +676,7 @@ async function handleSessionMessage(msg, session, chatId, userId) {
 
     } catch (err) {
       console.error('❌ handleSessionMessage error:', err.message);
-      await bot.deleteMessage(chatId, loadingMsg.message_id).catch(() => {});
+      await bot.deleteMessage(chatId, loadingMsg.message_id).catch(() => { });
       await bot.sendMessage(chatId, '❌ Terjadi kesalahan saat menganalisis teks. Silakan coba lagi atau kirim ulang pesan.');
     }
     return;
@@ -449,13 +685,83 @@ async function handleSessionMessage(msg, session, chatId, userId) {
   // ── State: FOLLOWUP → terima jawaban teks bebas untuk field saat ini ──
   if (session.step === 'FOLLOWUP' && session.currentField) {
     const field = session.currentField;
-    session.data[field] = text;
+
+    // Validasi input sebelum disimpan
+    const validation = validateField(field, text);
+    if (!validation.valid) {
+      await bot.sendMessage(chatId, validation.message, { parse_mode: 'HTML' });
+      return; // minta ulang tanpa maju ke field berikutnya
+    }
+
+    session.data[field] = validation.normalized || text;
     updateSession(chatId, userId, { data: session.data });
 
     await moveToNextField(chatId, userId, session);
     return;
   }
+
+  // ── State: EDITING → user mengetik nilai baru untuk field yang diedit ──
+  if (session.step === 'EDITING' && session.editingField) {
+    const field = session.editingField;
+
+    // Validasi nilai baru
+    const validation = validateField(field, text);
+    if (!validation.valid) {
+      await bot.sendMessage(chatId,
+        `${validation.message}\n\nSilakan kirim nilai yang valid, atau ketik /cancel untuk membatalkan.`,
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+
+    // Simpan nilai baru ke session
+    session.data[field] = validation.normalized || text.trim();
+    session.step = 'CONFIRM';
+    session.editingField = null;
+    updateSession(chatId, userId, { data: session.data, step: 'CONFIRM', editingField: null });
+
+    await bot.sendMessage(chatId,
+      `✅ <b>${escapeHTML(FIELD_LABELS[field] || field)}</b> berhasil diperbarui.`,
+      { parse_mode: 'HTML' }
+    );
+
+    // Tampilkan summary konfirmasi lagi
+    await askConfirmation(chatId, userId, session);
+    return;
+  }
+
+  // ── State: REPAIR_EDITING → user mengetik nilai baru untuk field tiket DB ──
+  if (session.step === 'REPAIR_EDITING' && session.editingField) {
+    const field = session.editingField;
+
+    // Validasi nilai baru
+    const validation = validateField(field, text);
+    if (!validation.valid) {
+      await bot.sendMessage(chatId,
+        `${validation.message}\n\nSilakan kirim nilai yang valid, atau ketik /cancel untuk membatalkan.`,
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+
+    // Simpan ke repairData (bukan data sesi biasa)
+    session.repairData[field] = validation.normalized || text.trim();
+    session.editingField = null;
+    updateSession(chatId, userId, { repairData: session.repairData, editingField: null });
+
+    const fieldLabel = DB_FIELD_LABELS[field] || FIELD_LABELS[field] || field;
+    await bot.sendMessage(chatId,
+      `✅ <b>${escapeHTML(fieldLabel)}</b> berhasil diperbarui.`,
+      { parse_mode: 'HTML' }
+    );
+
+    // Tampilkan kembali repair summary dengan data terbaru
+    const { text: summaryText, keyboard } = formatRepairSummary(session);
+    await bot.sendMessage(chatId, summaryText, { parse_mode: 'HTML', ...keyboard });
+    return;
+  }
 }
+
 
 // ================== HANDLER: FOLLOW-UP CALLBACK (dari tombol) ==================
 async function handleFollowUpCallback(query, chatId, userId, data) {
@@ -478,7 +784,7 @@ async function handleFollowUpCallback(query, chatId, userId, data) {
     await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
       chat_id: chatId,
       message_id: query.message.message_id
-    }).catch(() => {});
+    }).catch(() => { });
 
     await bot.sendMessage(chatId, `⏭ Field <b>${FIELD_LABELS[skippedField] || skippedField}</b> dilewati.`, { parse_mode: 'HTML' });
     await moveToNextField(chatId.toString(), userId, session);
@@ -486,16 +792,11 @@ async function handleFollowUpCallback(query, chatId, userId, data) {
   }
 
   // Handle pilihan field (fq_<field>_<value>)
-  // Field bisa berisi underscore (mis: issue_type, reported_time)
-  // Format: fq_<fieldName>_<value>  → field = parts[0], value = parts.slice(1).join('_')
-  // Kita cari field yang cocok dari FIELD_OPTIONS keys: category, severity, source, issue_type, project
   const knownFields = ['category', 'severity', 'source', 'issue_type', 'project'];
   let matchedField = null;
   let matchedValue = null;
 
   for (const f of knownFields) {
-    const fParts = f.split('_');
-    // Cek apakah bagian awal dari parts cocok dengan field
     const dataSuffix = data.replace(`fq_${f}_`, '');
     if (data.startsWith(`fq_${f}_`) && dataSuffix.length > 0) {
       matchedField = f;
@@ -512,15 +813,54 @@ async function handleFollowUpCallback(query, chatId, userId, data) {
     await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
       chat_id: chatId,
       message_id: query.message.message_id
-    }).catch(() => {});
+    }).catch(() => { });
 
-    const displayVal = matchedValue;
-    await bot.sendMessage(chatId, `✅ <b>${FIELD_LABELS[matchedField] || matchedField}</b>: ${escapeHTML(displayVal)}`, { parse_mode: 'HTML' });
+    await bot.sendMessage(chatId, `✅ <b>${FIELD_LABELS[matchedField] || matchedField}</b>: ${escapeHTML(matchedValue)}`, { parse_mode: 'HTML' });
     await moveToNextField(chatId.toString(), userId, session);
   }
 }
 
-// ================== HANDLER: KONFIRMASI SIMPAN ==================
+// ================== HANDLER: EDIT FIELD CALLBACK ==================
+async function handleEditFieldCallback(query, chatId, userId, data) {
+  const session = getSession(chatId.toString(), userId);
+  if (!session) {
+    await bot.sendMessage(chatId, '⚠️ Sesi tidak ditemukan. Ketik /tiket untuk memulai lagi.');
+    return;
+  }
+
+  // Format callback: edit_field_<fieldname>
+  const field = data.replace('edit_field_', '');
+  if (!ALL_FIELDS.includes(field)) {
+    await bot.sendMessage(chatId, '❌ Field tidak dikenali.');
+    return;
+  }
+
+  // Ubah state ke EDITING
+  session.step = 'EDITING';
+  session.editingField = field;
+  updateSession(chatId.toString(), userId, { step: 'EDITING', editingField: field });
+
+  // Cek apakah field ini punya opsi keyboard (pilihan cepat)
+  const canSkip = !isRequiredField(field);
+  const { question, keyboard } = getFieldPrompt(field, canSkip);
+  const fieldLabel = FIELD_LABELS[field] || field;
+  const currentVal = session.data[field];
+
+  // Hapus keyboard dari pesan konfirmasi agar tidak membingungkan
+  await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+    chat_id: chatId,
+    message_id: query.message.message_id
+  }).catch(() => { });
+
+  await bot.sendMessage(chatId,
+    `✏️ <b>Edit: ${escapeHTML(fieldLabel)}</b>\n` +
+    `${currentVal ? `Nilai sekarang: <i>${escapeHTML(String(currentVal))}</i>\n\n` : ''}` +
+    question,
+    { parse_mode: 'HTML', ...keyboard }
+  );
+}
+
+// ================== HANDLER: KONFIRMASI SIMPAN → KIRIM DRAFT KE UTT ==================
 async function handleManualConfirm(query, chatId, userId) {
   const session = getSession(chatId.toString(), userId);
   if (!session) {
@@ -531,7 +871,7 @@ async function handleManualConfirm(query, chatId, userId) {
   }
 
   // Edit pesan konfirmasi → tampilkan loading
-  await bot.editMessageText('⏳ Menyimpan tiket ke database...', {
+  await bot.editMessageText('⏳ Menyimpan draft tiket...', {
     chat_id: chatId,
     message_id: query.message.message_id,
     reply_markup: { inline_keyboard: [] }
@@ -541,9 +881,10 @@ async function handleManualConfirm(query, chatId, userId) {
     const ticketId = await generateTicketId();
     const d = session.data;
 
+    // Simpan ke DB dengan status DRAFT
     const emailObj = {
       id: ticketId,
-      from: session.senderName,
+      from: d.requester || session.senderName,
       subject: `[Manual] ${d.description ? d.description.substring(0, 80) : 'Tiket Manual'}`,
       body: session.rawText || d.description,
       source: d.source || 'telegram_manual',
@@ -551,54 +892,54 @@ async function handleManualConfirm(query, chatId, userId) {
     };
 
     const analysis = {
-      category: d.category,
-      severity: d.severity,
+      category: d.category || 'Incident Management',
+      severity: d.severity || 'medium',
+      priority: (d.severity || 'medium').toUpperCase(),
       summary: d.description,
       project: d.project,
       requester: d.requester,
       reported_time: d.reported_time,
       issue_type: d.issue_type,
+      confidence_score: 100,  // manual input selalu confident
     };
 
-    // Format pesan alert untuk main group
-    const now = new Date();
-    const tanggal = now.toLocaleDateString("id-ID", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-    const waktu = now.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Jakarta" });
+    // Simpan ke Supabase dengan status Draft
+    await saveEmailLog(
+      { ...emailObj, status: 'Draft' },
+      { ...analysis, status: 'Draft' },
+      false,   // belum telegram_sent
+      null,
+      null
+    );
 
-    const severityEmoji = { emergency: '🔴', high: '🟠', medium: '🟡', low: '🟢', others: '⚪' }[(d.severity || '').toLowerCase()] || '⚪';
-    const sourceMap = { email: '📧 Email', telepon: '📞 Telepon', whatsapp: '💬 WhatsApp', 'walk-in': '🚶 Walk-in', telegram: '✈️ Telegram', lainnya: '❓ Lainnya' };
+    // Update status ke Draft (saveEmailLog mungkin set In Progress)
+    await updateTicket(ticketId, { status: 'Draft' });
 
-    const alertMsg =
-      `📨 <b>TIKET MANUAL BARU</b>\n\n` +
-      `Ticket ID   : ${escapeHTML(ticketId)}\n` +
-      `Tanggal     : ${escapeHTML(tanggal)}\n` +
-      `Waktu Input : ${escapeHTML(waktu)} WIB\n` +
-      `Diinput oleh: ${escapeHTML(session.senderName)}\n\n` +
-      `━━━━━━━━━━━━━━━━━━━━━\n` +
-      `${severityEmoji} <b>Severity</b>    : ${escapeHTML(d.severity || 'medium')}\n` +
-      `🗂 <b>Kategori</b>    : ${escapeHTML(d.category || '-')}\n` +
-      `🖥 <b>Project</b>     : ${escapeHTML(d.project || '-')}\n` +
-      `👤 <b>Pelapor</b>     : ${escapeHTML(d.requester || '-')}\n` +
-      `📞 <b>Sumber</b>      : ${escapeHTML(sourceMap[d.source] || d.source || '-')}\n` +
-      `⏰ <b>Waktu Kejadian</b>: ${escapeHTML(d.reported_time || '-')}\n` +
-      `📌 <b>Issue Type</b>  : ${escapeHTML(d.issue_type || '-')}\n` +
-      `━━━━━━━━━━━━━━━━━━━━━\n` +
-      `📝 <b>Deskripsi:</b>\n${escapeHTML(d.description || session.rawText || '-')}`;
-
-    // Kirim alert ke main group
-    await sendIncidentAlert(emailObj, analysis, alertMsg);
-
-    // Destroy session
+    // Destroy sesi user
     destroySession(chatId.toString(), userId);
 
-    // Konfirmasi ke user
-    await bot.sendMessage(chatId,
-      `✅ <b>Tiket berhasil disimpan!</b>\n\n` +
+    // Konfirmasi ke user (chat pribadi / tempat user chatting)
+    await bot.editMessageText(
+      `✅ <b>Draft tiket tersimpan!</b>\n\n` +
       `📌 Ticket ID: <code>${ticketId}</code>\n` +
-      `Alert telah dikirim ke main group.\n\n` +
+      `Draft telah dikirim ke grup UTT untuk konfirmasi akhir.\n\n` +
       `Ketik /menu untuk kembali ke menu utama.`,
-      { parse_mode: 'HTML' }
+      { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'HTML' }
     );
+
+    // Kirim DRAFT ke grup UTT untuk pre-konfirmasi
+    const UTT_CHAT_ID = (env.TG_UTT_CHAT_ID || '-1003753882093').trim();
+    const { text: draftText, keyboard: draftKeyboard } = formatDraftForUTT(session, ticketId);
+
+    // Tambahkan rawText ke session agar data tersedia di formatDraftForUTT (sudah destroyed, pakai local)
+    // Buat ulang session object sementara untuk formatting
+    const tempSession = { data: d, senderName: session.senderName };
+    const { text: draftMsg, keyboard: draftKb } = formatDraftForUTT(tempSession, ticketId);
+
+    await bot.sendMessage(UTT_CHAT_ID, draftMsg, {
+      parse_mode: 'HTML',
+      ...draftKb
+    });
 
   } catch (err) {
     console.error('❌ handleManualConfirm error:', err.message);
@@ -606,6 +947,692 @@ async function handleManualConfirm(query, chatId, userId) {
     await bot.sendMessage(chatId, '❌ Gagal menyimpan tiket. Silakan coba lagi dengan /tiket baru.');
   }
 }
+
+// ================== HANDLER: DRAFT FIX & PUBLISH KE BEACON ==================
+async function handleDraftPublish(query, chatId, ticketId) {
+  const BEACON_CHAT_ID = (env.TG_BEACON_CHAT_ID || '-5546265953').trim();
+
+  // Edit pesan draft di UTT → loading
+  try {
+    await bot.editMessageText(
+      `⏳ Mempublish tiket <code>${escapeHTML(ticketId)}</code> ke Beacon...`,
+      { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
+    );
+  } catch (_) { }
+
+  try {
+    // Ambil tiket dari DB
+    const ticket = await getTicketById(ticketId);
+    if (!ticket) {
+      await bot.sendMessage(chatId, `❌ Tiket <code>${escapeHTML(ticketId)}</code> tidak ditemukan.`, { parse_mode: 'HTML' });
+      return;
+    }
+
+    // Update status ke In Progress
+    await updateTicket(ticketId, { status: 'In Progress' });
+
+    // Kirim tiket final ke Beacon
+    const beaconMsgId = await sendFinalTicketToBeacon(ticket, BEACON_CHAT_ID, 'In Progress');
+
+    // Update pesan di UTT → publish berhasil
+    try {
+      await bot.editMessageText(
+        `✅ <b>Tiket berhasil dipublish ke Beacon!</b>\n\n` +
+        `🎫 Ticket ID: <code>${escapeHTML(ticketId)}</code>\n` +
+        `Status: <b>In Progress</b>\n\n` +
+        `Tiket telah dikirim ke grup Beacon Hutabyte.`,
+        { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
+      );
+    } catch (_) { }
+
+  } catch (err) {
+    console.error('handleDraftPublish error:', err.message);
+    await bot.sendMessage(chatId, `Gagal mempublish tiket. Error: ${err.message}`);
+  }
+}
+
+// -- Konfirmasi tiket: L1 klik "✅ Ini Tiket" di Beacon --
+async function handleTicketConfirm(query, chatId, ticketId) {
+  try {
+    const now = new Date().toISOString();
+    await updateTicket(ticketId, {
+      status: 'In Progress',
+      confirmed_at: now,
+      confirmed_by: query.from?.first_name || query.from?.username || 'L1',
+      sla_deadline_minutes: 120,   // SLA Pekerjaan default 2 Jam
+    });
+
+    const ticket = await getTicketById(ticketId);
+    if (ticket) {
+      // Edit pesan kandidat → tampilkan format TIKET DIKONFIRMASI + tombol Edit & Eskalasi
+      const confirmedText = formatConfirmedTicketMessage({ ...ticket, status: 'In Progress' });
+      await bot.editMessageText(confirmedText, {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '✏️ Edit Tiket', callback_data: `edit_beacon_ticket_${ticketId}` },
+              { text: '⬆️ Eskalasi', callback_data: `escalate_ticket_${ticketId}` },
+            ]
+          ]
+        }
+      }).catch(() => { });
+
+      // Kirim notifikasi SLA Pekerjaan mulai berjalan
+      const confirmedBy = query.from?.first_name || query.from?.username || 'Tim';
+      const confirmedTime = new Date(now).toLocaleString('id-ID', {
+        timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
+        year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+      });
+      await bot.sendMessage(chatId,
+        `✅ <b>TIKET DIKONFIRMASI — SLA Pekerjaan Dimulai</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━\n` +
+        `🎫 Ticket ID      : <code>${escapeHTML(ticketId)}</code>\n` +
+        `👤 Dikonfirmasi   : <b>${escapeHTML(confirmedBy)}</b>\n` +
+        `⏰ Waktu          : ${escapeHTML(confirmedTime)}\n` +
+        `⏱ SLA Pekerjaan  : <b>2 Jam (Sedang Berjalan)</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━\n` +
+        `📋 Status         : 🔄 In Progress\n` +
+        `🚀 Pesan berhasil diteruskan ke Unified Ticket Table & ClickUp.`,
+        { parse_mode: 'HTML' }
+      ).catch(() => { });
+
+      // Push ke ClickUp
+      try {
+        const { handleL1Approve } = await import('../../usecases/processRawMessage.js');
+        await handleL1Approve(ticket);
+      } catch (_) { }
+    }
+
+    await bot.answerCallbackQuery(query.id, { text: `✅ Tiket ${ticketId} dikonfirmasi! SLA Pekerjaan 2 Jam dimulai.`, show_alert: true });
+    console.log(`[Confirm] Tiket ${ticketId} oleh ${query.from?.first_name || 'L1'}`);
+  } catch (err) {
+    console.error('handleTicketConfirm error:', err.message);
+    await bot.answerCallbackQuery(query.id, { text: 'Terjadi kesalahan. Coba lagi.', show_alert: true });
+  }
+}
+
+// -- Tolak tiket: L1 klik "❌ Bukan Tiket" di Beacon → tampilkan konfirmasi double-check --
+async function handleTicketReject(query, chatId, ticketId) {
+  try {
+    // Ambil subject tiket untuk konfirmasi
+    const ticket = await getTicketById(ticketId);
+    const subject = escapeHTML(ticket?.subject || ticket?.body?.substring(0, 60) || '-');
+
+    // Tampilkan konfirmasi ulang (double-check) tanpa mengubah pesan asli
+    await bot.answerCallbackQuery(query.id, { text: '⚠️ Konfirmasi diperlukan', show_alert: false });
+
+    // Kirim pesan konfirmasi double-check sebagai reply
+    await bot.sendMessage(chatId,
+      `⚠️ <b>KONFIRMASI</b>\n\n` +
+      `Apakah pesan ini benar-benar bukan tiket?\n\n` +
+      `📌 Pesan:\n<i>${subject}</i>`,
+      {
+        parse_mode: 'HTML',
+        reply_to_message_id: query.message.message_id,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '✅ Ya, Bukan Tiket', callback_data: `confirm_reject_${ticketId}` },
+              { text: '↩️ Batal', callback_data: `cancel_reject_${ticketId}` },
+            ]
+          ]
+        }
+      }
+    );
+
+    console.log(`[Reject-DoubleCheck] Konfirmasi double-check ditampilkan untuk ${ticketId}`);
+  } catch (err) {
+    console.error('handleTicketReject error:', err.message);
+    await bot.answerCallbackQuery(query.id, { text: 'Terjadi kesalahan. Coba lagi.', show_alert: true });
+  }
+}
+
+// -- Double-check: L1 klik "✅ Ya, Bukan Tiket" → set BUKAN TIKET --
+async function handleConfirmReject(query, chatId, ticketId) {
+  try {
+    const by = query.from?.first_name || query.from?.username || 'L1';
+    const now = new Date().toISOString();
+    const rejectedTime = new Date(now).toLocaleString('id-ID', {
+      timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
+      year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+
+    await updateTicket(ticketId, {
+      status: 'Cancelled',
+      rejected_by: by,
+      rejected_at: now,
+    });
+
+    // Edit pesan konfirmasi double-check → tampilkan hasil BUKAN TIKET
+    await bot.editMessageText(
+      `❌ <b>BUKAN TIKET</b>\n\n` +
+      `🆔 Intake ID     : <code>${escapeHTML(ticketId)}</code>\n` +
+      `👤 Ditandai oleh : ${escapeHTML(by)}\n` +
+      `⏰ Waktu         : ${escapeHTML(rejectedTime)}\n\n` +
+      `ℹ️ Pesan tidak diteruskan ke Unified Ticket Table dan ClickUp.`,
+      {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [] }
+      }
+    ).catch(() => { });
+
+    await bot.answerCallbackQuery(query.id, { text: `Tiket ${ticketId} ditandai bukan tiket.`, show_alert: true });
+    console.log(`[Reject-Confirmed] Tiket ${ticketId} ditolak oleh ${by}`);
+  } catch (err) {
+    console.error('handleConfirmReject error:', err.message);
+    await bot.answerCallbackQuery(query.id, { text: 'Terjadi kesalahan. Coba lagi.', show_alert: true });
+  }
+}
+
+// -- Double-check: L1 klik "↩️ Batal" → hapus pesan konfirmasi, biarkan tiket tetap --
+async function handleCancelReject(query, chatId, ticketId) {
+  try {
+    // Hapus pesan double-check saja
+    await bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+    await bot.answerCallbackQuery(query.id, { text: 'Dibatalkan. Tiket tetap aktif.', show_alert: false });
+    console.log(`[Reject-Cancelled] Penolakan ${ticketId} dibatalkan`);
+  } catch (err) {
+    console.error('handleCancelReject error:', err.message);
+    await bot.answerCallbackQuery(query.id, { text: 'Terjadi kesalahan.', show_alert: true });
+  }
+}
+
+// ================== HANDLER: EDIT TIKET DARI BEACON ==================
+async function handleBeaconEditTicket(query, chatId, ticketId) {
+  const UTT_CHAT_ID = (env.TG_UTT_CHAT_ID || '-1003753882093').trim();
+  const senderName = query.from?.first_name || query.from?.username || 'Unknown';
+  const userId = query.from?.id?.toString() || 'unknown';
+
+  try {
+    // Hapus keyboard dari pesan Beacon
+    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+      chat_id: chatId,
+      message_id: query.message.message_id
+    }).catch(() => { });
+
+    // Ambil tiket dari DB
+    const ticket = await getTicketById(ticketId);
+    if (!ticket) {
+      await bot.sendMessage(chatId, `❌ Tiket <code>${escapeHTML(ticketId)}</code> tidak ditemukan.`, { parse_mode: 'HTML' });
+      return;
+    }
+
+    // Buat sesi repair di UTT
+    createRepairSession(UTT_CHAT_ID, userId, ticket, senderName);
+    const session = getSession(UTT_CHAT_ID, userId);
+
+    const { text, keyboard } = formatRepairSummary(session);
+    await bot.sendMessage(UTT_CHAT_ID, `✏️ <b>Edit Tiket dari Beacon</b>\n🎫 Ticket ID: <code>${escapeHTML(ticketId)}</code>\n\n${text}`, {
+      parse_mode: 'HTML',
+      ...keyboard
+    });
+
+    await bot.answerCallbackQuery(query.id, { text: `Sesi edit tiket ${ticketId} dibuka di grup UTT.`, show_alert: true });
+    console.log(`[BeaconEdit] Tiket ${ticketId} dibuka untuk edit oleh ${senderName}`);
+  } catch (err) {
+    console.error('handleBeaconEditTicket error:', err.message);
+    await bot.answerCallbackQuery(query.id, { text: 'Terjadi kesalahan. Coba lagi.', show_alert: true });
+  }
+}
+
+// ================== HANDLER: ESKALASI TIKET DARI BEACON ==================
+async function handleBeaconEscalate(query, chatId, ticketId) {
+  try {
+    // Update status tiket ke Escalated
+    await updateTicket(ticketId, { status: 'Escalated', escalated_at: new Date().toISOString() });
+
+    const by = query.from?.first_name || query.from?.username || 'L1';
+    const ticket = await getTicketById(ticketId);
+    const severity = (ticket?.priority || ticket?.severity || 'MEDIUM').toUpperCase();
+    const sevEmoji = { CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡', LOW: '🟢', EMERGENCY: '🔴' }[severity] || '⚪';
+
+    // Edit keyboard dari pesan Beacon → hapus tombol
+    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+      chat_id: chatId,
+      message_id: query.message.message_id
+    }).catch(() => { });
+
+    // Kirim notifikasi eskalasi ke Beacon
+    await bot.sendMessage(chatId,
+      `⬆️ <b>Tiket Dieskala ke Head / Service Lead!</b>\n\n` +
+      `🎫 Ticket ID  : <code>${escapeHTML(ticketId)}</code>\n` +
+      `${sevEmoji} Severity   : <b>${escapeHTML(severity)}</b>\n` +
+      `📌 Subjek     : ${escapeHTML(ticket?.subject || '-')}\n` +
+      `👤 Dieskalasi : <b>${escapeHTML(by)}</b>\n` +
+      `📊 Status     : <b>Escalated</b>\n\n` +
+      `<i>Tiket ini telah diteruskan ke Head / Service Lead untuk penanganan lebih lanjut.</i>`,
+      { parse_mode: 'HTML', reply_to_message_id: query.message.message_id }
+    ).catch(() => { });
+
+    // Notifikasi DM ke jeremy & fahrezy (jika env var tersedia)
+    const leads = [env.TG_JEREMY_ID, env.TG_FAHREZY_ID].filter(Boolean);
+    if (leads.length > 0) {
+      const leadMsg =
+        `⬆️ <b>ESKALASI TIKET — dari ${escapeHTML(by)}</b>\n\n` +
+        `🎫 Ticket ID  : <code>${escapeHTML(ticketId)}</code>\n` +
+        `${sevEmoji} Severity   : <b>${escapeHTML(severity)}</b>\n` +
+        `📌 Subjek     : ${escapeHTML(ticket?.subject || '-')}\n\n` +
+        `Tiket ini dieskalasi oleh <b>${escapeHTML(by)}</b> dan memerlukan penanganan Anda sebagai Head / Service Lead.`;
+
+      for (const leadId of leads) {
+        try {
+          await bot.sendMessage(leadId.trim(), leadMsg, { parse_mode: 'HTML' });
+          console.log(`[Escalate] Notif eskalasi terkirim ke lead ${leadId}`);
+        } catch (leadErr) {
+          console.warn(`[Escalate] Gagal kirim notif ke lead ${leadId}:`, leadErr.message);
+        }
+      }
+    } else {
+      console.warn('[Escalate] Tidak ada TG_JEREMY_ID / TG_FAHREZY_ID di .env — notif lead dilewati.');
+    }
+
+    await bot.answerCallbackQuery(query.id, { text: `Tiket ${ticketId} berhasil dieskala ke Head/Service Lead.`, show_alert: true });
+    console.log(`[Escalate] Tiket ${ticketId} dieskala oleh ${by}`);
+  } catch (err) {
+    console.error('handleBeaconEscalate error:', err.message);
+    await bot.answerCallbackQuery(query.id, { text: 'Terjadi kesalahan. Coba lagi.', show_alert: true });
+  }
+}
+
+// ================== HANDLER: DRAFT — MASIH ADA PERUBAHAN ==================
+async function handleDraftEdit(query, chatId, userId) {
+  // Ekstrak ticketId dari teks pesan draft
+  const messageText = query.message.text || '';
+  const ticketIdMatch = messageText.match(/Ticket ID\s*:\s*(TCK-[\w-]+)/i);
+  const ticketId = ticketIdMatch ? ticketIdMatch[1] : null;
+
+  if (!ticketId) {
+    await bot.sendMessage(chatId, '❌ Tidak bisa menemukan Ticket ID dari pesan ini.');
+    return;
+  }
+
+  const senderName = query.from?.first_name || query.from?.username || 'Unknown';
+  const userIdStr = query.from?.id?.toString() || userId.toString();
+
+  // Cek sesi aktif
+  const existingSession = getSession(chatId.toString(), userIdStr);
+  if (existingSession) {
+    await bot.sendMessage(chatId, '⚠️ Kamu masih punya sesi aktif. Ketik /cancel dulu.');
+    return;
+  }
+
+  // Ambil tiket dari DB
+  const ticket = await getTicketById(ticketId);
+  if (!ticket) {
+    await bot.sendMessage(chatId, `❌ Tiket <code>${escapeHTML(ticketId)}</code> tidak ditemukan.`, { parse_mode: 'HTML' });
+    return;
+  }
+
+  // Buat sesi repair
+  createRepairSession(chatId.toString(), userIdStr, ticket, senderName);
+  const session = getSession(chatId.toString(), userIdStr);
+
+  // Edit pesan draft → info
+  try {
+    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+      chat_id: chatId,
+      message_id: query.message.message_id
+    });
+  } catch (_) { }
+
+  // Tampilkan repair summary
+  const { text, keyboard } = formatRepairSummary(session);
+  await bot.sendMessage(chatId, text, { parse_mode: 'HTML', ...keyboard });
+}
+
+// ================== HANDLER: DRAFT — BATALKAN ==================
+async function handleDraftCancel(query, chatId, ticketId) {
+  try {
+    // Update status tiket ke Cancelled di DB
+    await updateTicket(ticketId, { status: 'Cancelled' });
+
+    await bot.editMessageText(
+      `❌ <b>Draft tiket dibatalkan.</b>\n\n🎫 Ticket ID: <code>${escapeHTML(ticketId)}</code>\nStatus diubah ke: Cancelled`,
+      { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
+    );
+  } catch (err) {
+    console.error('❌ handleDraftCancel error:', err.message);
+    await bot.sendMessage(chatId, '❌ Gagal membatalkan draft tiket.');
+  }
+}
+
+// ================== HANDLER: REPAIR EDIT FIELD CALLBACK ==================
+async function handleRepairEditCallback(query, chatId, userId, data) {
+  // Format: repair_edit_<field>_<ticketId>
+  // ticketId format: TCK-YYYYMMDD-XXXX
+  // Kita perlu memisah field dari ticketId
+  const withoutPrefix = data.replace('repair_edit_', '');
+
+  // Cari titik pisah: field diikuti _ lalu TCK-...
+  const tckMatch = withoutPrefix.match(/_?(TCK-.+)$/);
+  if (!tckMatch) {
+    await bot.sendMessage(chatId, '❌ Format callback repair tidak valid.');
+    return;
+  }
+
+  const ticketId = tckMatch[1];
+  const field = withoutPrefix.replace(`_${ticketId}`, '').replace(/_$/, '');
+
+  const session = getSession(chatId.toString(), userId);
+  if (!session || session.mode !== 'REPAIR') {
+    await bot.sendMessage(chatId, '⚠️ Sesi repair tidak ditemukan. Ketik /get ' + ticketId + ' untuk memulai lagi.');
+    return;
+  }
+
+  // Set editing field
+  session.editingField = field;
+  updateSession(chatId.toString(), userId, { editingField: field });
+
+  const fieldLabel = DB_FIELD_LABELS[field] || FIELD_LABELS[field] || field;
+  const currentVal = session.repairData[field] || session.repairTicket[field];
+
+  // Hapus keyboard dari pesan repair summary
+  await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+    chat_id: chatId,
+    message_id: query.message.message_id
+  }).catch(() => { });
+
+  // Ambil prompt + opsi keyboard (gunakan prefix rq_ untuk repair)
+  const { question, keyboard } = getFieldPrompt(field, true, 'rq');
+
+  await bot.sendMessage(chatId,
+    `✏️ <b>Edit: ${escapeHTML(fieldLabel)}</b>\n` +
+    `${currentVal ? `Nilai sekarang: <i>${escapeHTML(String(currentVal))}</i>\n\n` : '\n'}` +
+    question,
+    { parse_mode: 'HTML', ...keyboard }
+  );
+}
+
+// ================== HANDLER: REPAIR FOLLOW-UP CALLBACK (tombol pilihan) ==================
+async function handleRepairFollowUpCallback(query, chatId, userId, data) {
+  // Format: rq_<field>_<value> atau rq_skip_<field>
+  const session = getSession(chatId.toString(), userId);
+  if (!session || session.mode !== 'REPAIR') {
+    await bot.sendMessage(chatId, '⚠️ Sesi repair tidak ditemukan.');
+    return;
+  }
+
+  const withoutPrefix = data.replace('rq_', '');
+
+  // Handle skip
+  if (withoutPrefix.startsWith('skip_')) {
+    const skippedField = withoutPrefix.replace('skip_', '');
+    session.repairData[skippedField] = null;
+    session.editingField = null;
+    updateSession(chatId.toString(), userId, { repairData: session.repairData, editingField: null });
+
+    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+      chat_id: chatId, message_id: query.message.message_id
+    }).catch(() => { });
+
+    const fieldLabel = DB_FIELD_LABELS[skippedField] || FIELD_LABELS[skippedField] || skippedField;
+    await bot.sendMessage(chatId, `⏭ Field <b>${escapeHTML(fieldLabel)}</b> dilewati.`, { parse_mode: 'HTML' });
+
+    // Tampilkan kembali repair summary
+    const { text: summaryText, keyboard } = formatRepairSummary(session);
+    await bot.sendMessage(chatId, summaryText, { parse_mode: 'HTML', ...keyboard });
+    return;
+  }
+
+  // Handle pilihan: rq_<field>_<value>
+  const knownFields = ['priority', 'status', 'category', 'source', 'issue_type', 'project', 'severity'];
+  let matchedField = null;
+  let matchedValue = null;
+
+  for (const f of knownFields) {
+    if (data.startsWith(`rq_${f}_`)) {
+      matchedField = f;
+      matchedValue = data.replace(`rq_${f}_`, '');
+      break;
+    }
+  }
+
+  if (matchedField && matchedValue) {
+    const validation = validateField(matchedField, matchedValue);
+    session.repairData[matchedField] = validation.normalized || matchedValue;
+    session.editingField = null;
+    updateSession(chatId.toString(), userId, { repairData: session.repairData, editingField: null });
+
+    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+      chat_id: chatId, message_id: query.message.message_id
+    }).catch(() => { });
+
+    const fieldLabel = DB_FIELD_LABELS[matchedField] || FIELD_LABELS[matchedField] || matchedField;
+    await bot.sendMessage(chatId, `✅ <b>${escapeHTML(fieldLabel)}</b>: ${escapeHTML(matchedValue)}`, { parse_mode: 'HTML' });
+
+    // Tampilkan kembali repair summary
+    const { text: summaryText, keyboard } = formatRepairSummary(session);
+    await bot.sendMessage(chatId, summaryText, { parse_mode: 'HTML', ...keyboard });
+  }
+}
+
+// ================== HANDLER: REPAIR PUBLISH → UPDATE DB + KIRIM KE BEACON ==================
+async function handleRepairPublish(query, chatId, userId, ticketId) {
+  const BEACON_CHAT_ID = (env.TG_BEACON_CHAT_ID || '-5546265953').trim();
+
+  const session = getSession(chatId.toString(), userId);
+  if (!session || session.mode !== 'REPAIR') {
+    await bot.sendMessage(chatId, '⚠️ Sesi repair tidak ditemukan. Ketik /get ' + ticketId + ' untuk memulai lagi.');
+    return;
+  }
+
+  // Edit pesan → loading
+  try {
+    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+      chat_id: chatId, message_id: query.message.message_id
+    });
+  } catch (_) { }
+
+  await bot.sendMessage(chatId, `⏳ Menyimpan perubahan dan re-publishing tiket <code>${escapeHTML(ticketId)}</code>...`, { parse_mode: 'HTML' });
+
+  try {
+    const originalTicket = session.repairTicket;
+    const repairData = session.repairData;
+
+    // Buat payload update — JANGAN sentuh processed_at dan ticket_id
+    const updatePayload = {};
+    const allowedUpdateFields = ['from', 'subject', 'body', 'summary', 'category', 'priority', 'source', 'status'];
+
+    for (const field of allowedUpdateFields) {
+      if (repairData[field] !== undefined && repairData[field] !== originalTicket[field]) {
+        updatePayload[field] = repairData[field];
+      }
+    }
+
+    if (Object.keys(updatePayload).length > 0) {
+      const success = await updateTicket(ticketId, updatePayload);
+      if (!success) {
+        await bot.sendMessage(chatId, '❌ Gagal menyimpan perubahan ke database.');
+        return;
+      }
+      console.log(`✅ Repair tiket ${ticketId} — fields updated:`, Object.keys(updatePayload).join(', '));
+    } else {
+      console.log(`ℹ️ Repair tiket ${ticketId} — tidak ada field yang berubah.`);
+    }
+
+    // Destroy sesi repair
+    destroySession(chatId.toString(), userId);
+
+    // Ambil data tiket terbaru dari DB
+    const updatedTicket = await getTicketById(ticketId);
+
+    // Kirim pesan update ke Beacon
+    await sendFinalTicketToBeacon(updatedTicket || { ...originalTicket, ...updatePayload }, BEACON_CHAT_ID, updatedTicket?.status || originalTicket.status, true);
+
+    await bot.sendMessage(chatId,
+      `✅ <b>Tiket berhasil diupdate dan re-published ke Beacon!</b>\n\n` +
+      `🎫 Ticket ID: <code>${escapeHTML(ticketId)}</code>\n` +
+      `📅 Tanggal awal tiket: <i>terjaga, tidak berubah</i>\n\n` +
+      `Ketik /menu untuk kembali ke menu utama.`,
+      { parse_mode: 'HTML' }
+    );
+
+  } catch (err) {
+    console.error('❌ handleRepairPublish error:', err.message);
+    destroySession(chatId.toString(), userId);
+    await bot.sendMessage(chatId, `❌ Gagal re-publish tiket. Error: ${err.message}`);
+  }
+}
+
+// ================== HELPER: FORMAT PESAN KANDIDAT TIKET (untuk Beacon) ==================
+function formatCandidateTicketMessage(ticket) {
+  const channelMap = {
+    email: 'Email', telegram: 'Telegram – Grup',
+    telegram_manual: 'Telegram – Manual', telegram_personal: 'Telegram – Direct Message',
+    whatsapp: 'WhatsApp', wa_group: 'WhatsApp – Grup', wa_dm: 'WhatsApp – Direct Message',
+    telepon: 'Telepon', 'walk-in': 'Walk-in',
+  };
+  const channel = channelMap[(ticket.source || '').toLowerCase()] || (ticket.source || 'System');
+
+  const diterima = ticket.processed_at
+    ? new Date(ticket.processed_at).toLocaleString('id-ID', {
+        timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
+        year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+      })
+    : '-';
+
+  const severity = ticket.priority || ticket.severity || null;
+  const priority = ticket.priority || null;
+  const category = ticket.category || null;
+  // Intake ID: gunakan ticket_id sebagai referensi (format TCK-YYYYMMDD-XXXX)
+  const intakeId = ticket.ticket_id || ticket.id || '-';
+  const statusLabel = 'Menunggu Konfirmasi (SLA: 15 Menit)';
+
+  const DIVIDER = '━━━━━━━━━━━━━━━━━━━━━';
+
+  return (
+    `📥 <b>KANDIDAT TIKET BARU</b>\n` +
+    `${DIVIDER}\n` +
+    `🆔 Intake ID   : <code>${escapeHTML(intakeId)}</code>\n` +
+    `📅 Diterima    : ${escapeHTML(diterima)}\n` +
+    `${DIVIDER}\n` +
+    `📡 Channel     : ${escapeHTML(channel)}\n` +
+    `👤 Dari        : ${escapeHTML(ticket.from || '-')}\n` +
+    `📌 Subject     : ${escapeHTML(ticket.subject || '-')}\n` +
+    `${DIVIDER}\n` +
+    `🗂 Kategori    : ${escapeHTML(category || 'Belum diisi')}\n` +
+    `⚠️ Severity    : ${escapeHTML(severity ? severity.toUpperCase() : 'Belum diisi')}\n` +
+    `🟡 Priority    : ${escapeHTML(priority ? priority.toUpperCase() : 'Belum diisi')}\n` +
+    `📋 Status      : ${escapeHTML(statusLabel)}\n` +
+    `${DIVIDER}\n` +
+    `🗒 Ringkasan: ${escapeHTML(ticket.summary || '-')}\n\n` +
+    `💬 Pesan Asli:\n${escapeHTML((ticket.body || '-').substring(0, 500))}` +
+    ((ticket.body || '').length > 500 ? '\n<i>...pesan terpotong</i>' : '') +
+    `\n\n<i>Apakah pesan ini merupakan tiket?</i>`
+  );
+}
+
+// ================== HELPER: FORMAT PESAN TIKET DIKONFIRMASI (setelah ✅) ==================
+function formatConfirmedTicketMessage(ticket) {
+  const channelMap = {
+    email: 'Email', telegram: 'Telegram – Grup',
+    telegram_manual: 'Telegram – Manual', telegram_personal: 'Telegram – Direct Message',
+    whatsapp: 'WhatsApp', wa_group: 'WhatsApp – Grup', wa_dm: 'WhatsApp – Direct Message',
+    telepon: 'Telepon', 'walk-in': 'Walk-in',
+  };
+  const channel = channelMap[(ticket.source || '').toLowerCase()] || (ticket.source || 'System');
+
+  const diterima = ticket.processed_at
+    ? new Date(ticket.processed_at).toLocaleString('id-ID', {
+        timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
+        year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+      })
+    : '-';
+
+  const severity = ticket.priority || ticket.severity || '-';
+  const category = ticket.category || '-';
+  const statusMap = {
+    'In Progress': '🔄 In Progress', 'Done': '✅ Resolved (Done)', 'Resolved': '✅ Resolved',
+    'Escalated': '⬆️ Escalated', 'Cancelled': '❌ Cancelled', 'Draft': '📝 Draft',
+    'Open': '⏳ Open',
+  };
+  const statusLabel = statusMap[ticket.status] || ticket.status || '🔄 In Progress';
+
+  const DIVIDER = '━━━━━━━━━━━━━━━━━━━━━';
+
+  return (
+    `✅ <b>TIKET DIKONFIRMASI</b>\n` +
+    `${DIVIDER}\n` +
+    `🎫 Ticket ID   : <code>${escapeHTML(ticket.ticket_id || '-')}</code>\n` +
+    `📅 Diterima    : ${escapeHTML(diterima)}\n` +
+    `📡 Channel     : ${escapeHTML(channel)}\n` +
+    `👤 Dari        : ${escapeHTML(ticket.from || '-')}\n` +
+    `📌 Subject     : ${escapeHTML(ticket.subject || '-')}\n` +
+    `${DIVIDER}\n` +
+    `🗂 Kategori    : ${escapeHTML(category)}\n` +
+    `⚠️ Severity    : ${escapeHTML(severity.toUpperCase())}\n` +
+    `🔄 Status      : ${escapeHTML(statusLabel)}\n` +
+    `${DIVIDER}\n` +
+    `🗒 Summary: ${escapeHTML(ticket.summary || '-')}\n` +
+    `📝 Isi Pesan: ${escapeHTML((ticket.body || '-').substring(0, 500))}` +
+    ((ticket.body || '').length > 500 ? '\n<i>...pesan terpotong</i>' : '') +
+    `\n\n<i>✅ Tiket dikonfirmasi. Timer SLA mulai berjalan.</i>`
+  );
+}
+
+// ================== HELPER: KIRIM KANDIDAT TIKET KE GRUP BEACON ==================
+async function sendFinalTicketToBeacon(ticket, beaconChatId, status = 'In Progress', isUpdate = false) {
+  const botInstance = initTelegramBot();
+
+  // Untuk UPDATE tiket (repair/edit), gunakan format konfirmasi dengan tombol Edit & Eskalasi
+  // Untuk TIKET BARU, gunakan format KANDIDAT dengan tombol Ini Tiket & Bukan Tiket
+  let messageText;
+  let keyboard;
+
+  if (isUpdate) {
+    // Re-publish setelah edit: tampilkan format dikonfirmasi + tombol edit/eskalasi
+    messageText = formatConfirmedTicketMessage({ ...ticket, status });
+    keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '✏️ Edit Tiket', callback_data: `edit_beacon_ticket_${ticket.ticket_id}` },
+            { text: '⬆️ Eskalasi', callback_data: `escalate_ticket_${ticket.ticket_id}` },
+          ]
+        ]
+      }
+    };
+  } else {
+    // Tiket baru: tampilkan sebagai KANDIDAT
+    messageText = formatCandidateTicketMessage({ ...ticket, status });
+    keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '✅ Ini Tiket', callback_data: `confirm_ticket_${ticket.ticket_id}` },
+            { text: '❌ Bukan Tiket', callback_data: `reject_ticket_${ticket.ticket_id}` },
+          ]
+        ]
+      }
+    };
+  }
+
+  try {
+    const sent = await botInstance.sendMessage(beaconChatId, messageText, {
+      parse_mode: 'HTML', ...keyboard,
+    });
+
+    if (ticket.ticket_id && sent?.message_id) {
+      await updateTicket(ticket.ticket_id, {
+        telegram_sent: true,
+        telegram_message_id: sent.message_id.toString(),
+        telegram_chat_id: beaconChatId,
+      });
+    }
+
+    console.log(`Tiket ${ticket.ticket_id} terkirim ke Beacon (msg: ${sent?.message_id})`);
+    return sent?.message_id;
+  } catch (err) {
+    console.error(`Gagal kirim tiket ke Beacon:`, err.message);
+    return null;
+  }
+}
+
 
 // ================== HELPER: LANJUT KE FIELD BERIKUTNYA ==================
 async function moveToNextField(chatId, userId, session) {
@@ -646,33 +1673,23 @@ async function askNextField(chatId, userId, session) {
 
 // ================== HELPER: TAMPILKAN KONFIRMASI AKHIR ==================
 async function askConfirmation(chatId, userId, session) {
-  const summary = formatSessionSummary(session);
-
-  const keyboard = {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: '✅ Ya, Simpan Tiket', callback_data: 'manual_confirm' },
-          { text: '❌ Batalkan', callback_data: 'manual_cancel' },
-        ]
-      ]
-    }
-  };
-
-  await bot.sendMessage(chatId, summary, { parse_mode: 'HTML', ...keyboard });
+  const { text, keyboard } = formatSessionSummary(session);
+  session.step = 'CONFIRM';
+  updateSession(chatId, userId, { step: 'CONFIRM' });
+  await bot.sendMessage(chatId, text, { parse_mode: 'HTML', ...keyboard });
 }
 
 // ================== HELPER: RINGKASAN HASIL AI EXTRACTION ==================
 function buildExtractionSummary(data, extracted) {
   const fields = [
-    { key: 'description',   label: '📝 Deskripsi',   emoji: '' },
-    { key: 'category',      label: '🗂 Kategori',     emoji: '' },
-    { key: 'severity',      label: '🚦 Severity',     emoji: '' },
-    { key: 'project',       label: '🖥 Project',      emoji: '' },
-    { key: 'requester',     label: '👤 Pelapor',      emoji: '' },
-    { key: 'source',        label: '📞 Sumber',       emoji: '' },
-    { key: 'reported_time', label: '⏰ Waktu',         emoji: '' },
-    { key: 'issue_type',    label: '📌 Issue Type',   emoji: '' },
+    { key: 'description', label: '📝 Deskripsi', emoji: '' },
+    { key: 'category', label: '🗂 Kategori', emoji: '' },
+    { key: 'severity', label: '🚦 Severity', emoji: '' },
+    { key: 'project', label: '🖥 Project', emoji: '' },
+    { key: 'requester', label: '👤 Pelapor', emoji: '' },
+    { key: 'source', label: '📞 Sumber', emoji: '' },
+    { key: 'reported_time', label: '⏰ Waktu', emoji: '' },
+    { key: 'issue_type', label: '📌 Issue Type', emoji: '' },
   ];
 
   let text = `🤖 <b>Hasil Analisis AI</b>\n\n`;
@@ -759,135 +1776,129 @@ function escapeHTML(text = '') {
     .replace(/>/g, '&gt;');
 }
 
-// ================== CREATE FORMAL TICKET ==================
+// ================== CREATE FORMAL TICKET (dipakai untuk status update di Telegram) ==================
+// Untuk tiket baru ke Beacon → pakai formatCandidateTicketMessage()
+// Fungsi ini dipakai untuk pesan update status (Done, Escalated, dll)
 function createFormalTicket(email, analysis = {}) {
-  const now = email.created_at ? new Date(email.created_at) : (email.processed_at ? new Date(email.processed_at) : new Date());
-  
-  // Format tanggal: 1/7/2026
-  const tanggal = now.toLocaleDateString("id-ID", {
-    day: "numeric",
-    month: "numeric",
-    year: "numeric"
+  const now = email.created_at ? new Date(email.created_at)
+    : email.processed_at ? new Date(email.processed_at) : new Date();
+
+  const diterima = now.toLocaleString('id-ID', {
+    timeZone: 'Asia/Jakarta',
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false
   });
-  
-  // Format waktu: 14.37.12
-  const waktu = now.toLocaleTimeString("id-ID", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-    timeZone: "Asia/Jakarta"
-  }).replace(/:/g, '.');
 
-  const sourceMap = {
-    email: "EMAIL",
-    telegram_group: "TELEGRAM GROUP",
-    whatsapp: "WHATSAPP"
+  const channelMap = {
+    email: 'Email', telegram: 'Telegram – Grup', telegram_group: 'Telegram – Grup',
+    telegram_manual: 'Telegram – Manual', telegram_personal: 'Telegram – Direct Message',
+    whatsapp: 'WhatsApp', wa_group: 'WhatsApp – Grup', wa_dm: 'WhatsApp – Direct Message',
+    telepon: 'Telepon', 'walk-in': 'Walk-in',
   };
-  const sourceLabel = sourceMap[email.source] || (email.source || "SYSTEM").toUpperCase();
-
-  const statusMap = {
-    Done: "✅ Resolved (Done)",
-    Escalated: "🔄 Escalated",
-    Cancelled: "❌ Cancelled",
-    NoAction: "➖ No Action Needed",
-    "In Progress": "In Progress"
-  };
-  const statusDisplay = statusMap[email.status] || email.status || "In Progress";
-
-  const priority = (analysis.priority || email.priority || "MEDIUM").toUpperCase();
-  const category = analysis.category || email.category || "Incident Management";
-  const summary = analysis.summary || email.summary || "-";
+  const channel = channelMap[(email.source || '').toLowerCase()] || (email.source || 'System');
+  const severity = (analysis.severity || analysis.priority || email.priority || email.severity || '-');
+  const category = analysis.category || email.category || '-';
+  const summary = analysis.summary || email.summary || '-';
   const ticketId = email.id || email.ticket_id;
 
-  return `🚨 <b>PESAN BARU DARI ${sourceLabel}</b> 🚨
+  const statusMap = {
+    'Open': '⏳ Open', 'Pending Confirmation': '⏳ Pending Confirmation',
+    'In Progress': '🔄 In Progress', 'Done': '✅ Resolved (Done)', 'Resolved': '✅ Resolved',
+    'Escalated': '⬆️ Escalated', 'Cancelled': '❌ Cancelled', 'NoAction': '➖ No Action', 'Draft': '📝 Draft',
+  };
+  const statusLabel = statusMap[email.status] || email.status || '⏳ Open';
 
-<b>Ticket ID</b>: ${escapeHTML(ticketId)}
-<b>Received</b> : ${escapeHTML(tanggal)}, ${escapeHTML(waktu)} WIB
+  const DIVIDER = '━━━━━━━━━━━━━━━━━━━━━';
 
-<b>From</b>     : ${escapeHTML(email.from)}
-
-<b>Subject</b>  : ${escapeHTML(email.subject || email.group_name || '-')}
-
-<b>Summary</b>  :
-${escapeHTML(summary)}
-
-<b>Content</b>:
-${escapeHTML(email.body)}
-
-<b>Priority</b> : ${escapeHTML(priority)}
-<b>Category</b> : ${escapeHTML(category)}
-<b>Status</b>   : ${escapeHTML(statusDisplay)}`;
+  return (
+    `✅ <b>TIKET DIKONFIRMASI</b>\n` +
+    `${DIVIDER}\n` +
+    `🎫 Ticket ID   : <code>${escapeHTML(ticketId || '-')}</code>\n` +
+    `📅 Diterima    : ${escapeHTML(diterima)}\n` +
+    `📡 Channel     : ${escapeHTML(channel)}\n` +
+    `👤 Dari        : ${escapeHTML(email.from || '-')}\n` +
+    `📌 Subject     : ${escapeHTML(email.subject || email.group_name || '-')}\n` +
+    `${DIVIDER}\n` +
+    `🗂 Kategori    : ${escapeHTML(category)}\n` +
+    `⚠️ Severity    : ${escapeHTML(severity ? severity.toUpperCase() : '-')}\n` +
+    `🔄 Status      : ${escapeHTML(statusLabel)}\n` +
+    `${DIVIDER}\n` +
+    `🗒 Summary: ${escapeHTML(summary)}\n` +
+    `📝 Isi Pesan: ${escapeHTML((email.body || '-').substring(0, 600))}` +
+    ((email.body || '').length > 600 ? '\n<i>...pesan terpotong</i>' : '')
+  );
 }
 
 // ================== SEND INCIDENT ALERT ==================
 async function sendIncidentAlert(email, analysis = {}, customMessage = null) {
   const botInstance = initTelegramBot();
-  const CHAT_ID = env.TG_CHAT_ID.trim();
+  // Mengirim kandidat tiket baru ke grup pre-konfirmasi & edit (TG_UTT_CHAT_ID = BTO -5546265953)
+  const BEACON_ID = (env.TG_UTT_CHAT_ID || env.TG_CHAT_ID).trim();
 
   const activeAnalysis = analysis && Object.keys(analysis).length > 0 ? analysis : (email.analysis || {});
-  const confidence = activeAnalysis.confidence_score !== undefined ? Number(activeAnalysis.confidence_score) : 100;
-  const isPending = confidence < 80;
 
-  let messageText = customMessage || email.formalMessage || createFormalTicket(email, activeAnalysis);
+  // Gabungkan data email + analisis untuk kandidat tiket
+  const ticketForFormat = {
+    ...email,
+    priority: activeAnalysis.severity || activeAnalysis.priority || email.priority || email.severity,
+    category: activeAnalysis.category || email.category,
+    summary: activeAnalysis.summary || email.summary,
+    status: email.status || 'Draft',
+    ticket_id: email.ticket_id || email.id,
+  };
 
-  if (isPending) {
-    messageText = `⚠️ <b>BUTUH KONFIRMASI (Confidence: ${confidence}%)</b>\n\n` + messageText;
-  }
+  // customMessage override (jika ada), kalau tidak pakai format KANDIDAT TIKET BARU
+  const messageText = customMessage || email.formalMessage || formatCandidateTicketMessage(ticketForFormat);
 
-  const severity = (activeAnalysis.severity || "medium").toLowerCase();
-  const notifyLoud = ["emergency", "high"].includes(severity);
+  const severity = (activeAnalysis.severity || activeAnalysis.priority || 'medium').toLowerCase();
+  const notifyLoud = ['emergency', 'critical', 'high'].includes(severity);
+  const ticketId = email.ticket_id || email.id;
 
   let telegramMessageId = null;
   let telegramChatId = null;
 
   try {
+    // Tombol awal KANDIDAT: hanya [✅ Ini Tiket] dan [❌ Bukan Tiket]
     const keyboard = {
       reply_markup: {
-        inline_keyboard: isPending ? [
+        inline_keyboard: [
           [
-            { text: "✅ Approve (Confirm Ticket)", callback_data: "status_In Progress" },
-            { text: "❌ Reject (No Action)", callback_data: "status_NoAction" }
-          ]
-        ] : [
-          [
-            { text: "✅ Resolved", callback_data: "status_Done" },
-            { text: "🔄 Escalated", callback_data: "status_Escalated" }
-          ],
-          [
-            { text: "❌ Cancel", callback_data: "status_Cancelled" },
-            { text: "➖ No Action", callback_data: "status_NoAction" }
+            { text: '✅ Ini Tiket', callback_data: `confirm_ticket_${ticketId}` },
+            { text: '❌ Bukan Tiket', callback_data: `reject_ticket_${ticketId}` },
           ]
         ]
       }
     };
 
-    const sent = await botInstance.sendMessage(CHAT_ID, messageText, {
-      parse_mode: "HTML",
+    const sent = await botInstance.sendMessage(BEACON_ID, messageText, {
+      parse_mode: 'HTML',
       ...keyboard,
-      disable_notification: !notifyLoud && !isPending
+      disable_notification: !notifyLoud,
     });
 
     telegramMessageId = sent.message_id.toString();
     telegramChatId = sent.chat.id.toString();
-    console.log(`✅ Alert terkirim ke Telegram (message_id: ${telegramMessageId})`);
+    console.log(`Alert terkirim ke Beacon (msg: ${telegramMessageId})`);
   } catch (err) {
+<<<<<<< HEAD
     console.error("⚠️ Gagal mengirim notifikasi alert ke Telegram:", err.message);
     // Jangan hentikan proses, biarkan tiket tetap tersimpan di database.
+=======
+    console.error('Gagal kirim alert ke Beacon:', err.message);
+>>>>>>> input_manual_tele
   }
 
-  // Simpan telegramChatId berformat "alertChatId|monitoredGroupId" agar bisa dilacak
-  const dbTelegramChatId = email.group_id && telegramChatId 
-    ? `${telegramChatId}|${email.group_id}` 
-    : telegramChatId;
+  const dbChatId = email.group_id && telegramChatId
+    ? `${telegramChatId}|${email.group_id}` : telegramChatId;
 
-  // Tetap simpan ke Supabase meskipun Telegram gagal
+  // Set intake_received_at = waktu notifikasi kandidat dikirim (start SLA Konfirmasi 15 Menit)
+  const intakeNow = new Date().toISOString();
   await saveEmailLog(
-    email,
+    { ...email, intake_received_at: intakeNow },
     activeAnalysis,
-    telegramMessageId ? true : false,
+    !!telegramMessageId,
     telegramMessageId,
-    dbTelegramChatId
+    dbChatId
   );
 }
 
@@ -929,12 +1940,12 @@ export async function updateIncidentStatusAndMessage(ticketId, newStatus, isAuto
         id: ticket.ticket_id,
         status: newStatus
       };
-      
+
       const newAlertMessageText = createFormalTicket(updatedTicketData);
 
       try {
         const botInstance = initTelegramBot();
-        
+
         const isPendingToActive = newStatus === "In Progress";
         const keyboard = isPendingToActive ? {
           inline_keyboard: [
@@ -984,11 +1995,24 @@ async function handleStatusChange(query, chatId, newStatus) {
 
   if (ticketId) {
     await updateIncidentStatusAndMessage(ticketId, newStatus, false);
+
+    // ── L1 Approve: jika status berubah ke "In Progress" (dari Pending Confirmation) ──
+    // Ini berarti L1 baru saja klik "Approve" → push tiket ke ClickUp
+    if (newStatus === 'In Progress') {
+      try {
+        const { getTicketById: fetchTicket } = await import('../../database/supabase.js');
+        const { handleL1Approve } = await import('../../usecases/processRawMessage.js');
+        const ticket = await fetchTicket(ticketId);
+        if (ticket) await handleL1Approve(ticket);
+      } catch (approveErr) {
+        console.warn(`⚠️ L1 Approve ClickUp push error (tidak kritis): ${approveErr.message}`);
+      }
+    }
   } else {
     // Fallback jika tidak menemukan Ticket ID di teks
     const messageId = query.message.message_id;
     await updateIncidentStatus(messageId.toString(), newStatus);
-    
+
     const statusMap = {
       Done: "✅ Resolved (Done)",
       Escalated: "🔄 Escalated",
@@ -1015,7 +2039,8 @@ async function handleStatusChange(query, chatId, newStatus) {
     Done: "✅ Resolved (Done)",
     Escalated: "🔄 Escalated",
     Cancelled: "❌ Cancelled",
-    NoAction: "➖ No Action Needed"
+    NoAction: "➖ No Action Needed",
+    "In Progress": "✅ Dikonfirmasi (In Progress)"
   };
   const statusDisplay = statusMap[newStatus] || newStatus;
 
@@ -1024,6 +2049,7 @@ async function handleStatusChange(query, chatId, newStatus) {
     show_alert: true
   });
 }
+
 
 // ================== MENU & INFO ==================
 async function sendGroupInfo(msg) {

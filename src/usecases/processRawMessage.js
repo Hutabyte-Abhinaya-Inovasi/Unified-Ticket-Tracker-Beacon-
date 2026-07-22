@@ -40,6 +40,14 @@ import {
   updateIncidentStatusAndMessage,
 } from '../infrastructure/telegram/telegramService.js';
 
+import {
+  pushTicketToClickUp,
+} from '../infrastructure/clickup/clickupService.js';
+
+import {
+  updateTicket,
+} from '../database/supabase.js';
+
 // ─── Keyword heuristik untuk pesan balasan singkat ───────────────────────────
 const REPLY_KEYWORDS = [
   "baik", "oke", "ok", "siap", "aman", "done", "proses",
@@ -237,7 +245,7 @@ export async function processRawMessage(rawMsg) {
     console.log(`   📋 Tidak ada tiket aktif yang cocok → buat tiket baru`);
   }
 
-  // ── STEP 6: Buat tiket baru ───────────────────────────────────────────────
+  // ── STEP 6: Buat tiket baru ────────────────────────────────────────────
   const ticketId = await generateTicketId();
   console.log(`   🆕 Membuat tiket baru: ${ticketId}`);
 
@@ -253,12 +261,58 @@ export async function processRawMessage(rawMsg) {
     group_name: groupName,
   };
 
-  // Kirim alert ke Telegram + simpan ke Unified_Ticket_Tracker via saveEmailLog
-  await sendIncidentAlert(emailObj, analysis);
+  // Semua tiket baru masuk ke status "Pending Confirmation" — L1 harus approve
+  // Confidence score sengaja disetel rendah (< 80) agar alert menampilkan tombol
+  // [Approve] dan [Reject] bukan tombol status biasa.
+  const pendingAnalysis = {
+    ...analysis,
+    confidence_score: analysis.confidence_score !== undefined
+      ? Math.min(analysis.confidence_score, 79)  // paksa < 80 agar muncul tombol L1
+      : 70,
+  };
+
+  // Kirim alert ke Telegram (dengan tombol Approve/Reject untuk L1)
+  // → saveEmailLog dipanggil di dalam sendIncidentAlert
+  await sendIncidentAlert(emailObj, pendingAnalysis);
 
   // Mark raw sebagai processed & link ke tiket baru
+  // (ClickUp akan dipush setelah L1 approve via callback handleStatusChange)
   await markRawMessageAs(rawMsg.id, 'processed', ticketId);
 
-  console.log(`   ✅ Tiket baru berhasil dibuat: ${ticketId}`);
+  console.log(`   ✅ Tiket baru berhasil dibuat: ${ticketId} (menunggu konfirmasi L1)`);
   return { action: 'created', ticketId };
+}
+
+// ────────────────────────────────────────────────────────────────────
+// HANDLER: L1 Approve → auto-push ke ClickUp
+// Dipanggil dari telegramService.handleStatusChange saat L1 klik "Approve"
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * Dipanggil setelah L1 mengklik "Approve" (Konfirmasi).
+ * Mengubah status tiket dari "Pending Confirmation" ke "In Progress"
+ * dan mengirim tiket ke ClickUp secara otomatis.
+ *
+ * @param {Object} ticket  - Row Unified_Ticket_Tracker yang baru saja diapprove
+ */
+export async function handleL1Approve(ticket) {
+  console.log(`✅ [L1 Approve] Tiket ${ticket.ticket_id} dikonfirmasi, push ke ClickUp...`);
+
+  try {
+    const clickupResult = await pushTicketToClickUp(ticket);
+
+    if (clickupResult) {
+      // Simpan clickup_task_id dan clickup_url ke Supabase
+      await updateTicket(ticket.ticket_id, {
+        clickup_task_id: clickupResult.clickup_task_id,
+        clickup_url:     clickupResult.clickup_url,
+      });
+      console.log(`📋 [ClickUp] Task berhasil: ${clickupResult.clickup_url}`);
+    } else {
+      console.warn(`⚠️  ClickUp push dilewati (API Key atau List ID belum dikonfigurasi).`);
+    }
+  } catch (err) {
+    console.error(`❌ [L1 Approve] Gagal push ke ClickUp:`, err.message);
+    // Tidak throw — L1 approve tetap berlaku walau ClickUp gagal
+  }
 }

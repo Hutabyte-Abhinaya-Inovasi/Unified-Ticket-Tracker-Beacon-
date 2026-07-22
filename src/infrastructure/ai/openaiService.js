@@ -6,8 +6,8 @@ import { runPipeline } from "./pipeline/runPipeline.js";
 
 const MAX_RETRY = 5;
 const TABLE_NAME = "Unified_Ticket_Tracker";
-const MAX_QUERY_ROWS = 100;
 const DEFAULT_QUERY_ROWS = 50;
+const MAX_QUERY_ROWS = 100;
 
 // ==================== TOOLS DEFINITION ====================
 const tools = [

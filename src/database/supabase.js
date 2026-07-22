@@ -82,6 +82,8 @@ export async function saveEmailLog(email, analysis = {}, telegramSent = false, t
       telegram_sent: telegramSent,
       telegram_message_id: telegramMessageId,
       telegram_chat_id: telegramChatId,
+      // intake_received_at: waktu notifikasi kandidat dikirim (start SLA Konfirmasi 15 Menit)
+      intake_received_at: email.intake_received_at || (telegramSent ? new Date().toISOString() : null),
       status: telegramSent
         ? (analysis.confidence_score !== undefined && Number(analysis.confidence_score) < 80 ? "Pending Confirmation" : "In Progress")
         : "Logged (No Action)",
@@ -129,22 +131,22 @@ export async function saveRawTelegramDM(dmData) {
     const ticketId = await generateTicketId();
 
     const payload = {
-      ticket_id:          ticketId,
-      email_id:           `TG-DM-${dmData.messageId || Date.now()}`,
-      from:               dmData.senderPhone
-                            ? `${dmData.senderName} (${dmData.senderPhone})`
-                            : dmData.senderName,
-      subject:            `[DM Pribadi] Pesan dari ${dmData.senderName}`,
-      body:               dmData.messageText,
-      summary:            null,                       // diisi AI setelah normalisasi
-      category:           'Incident Management',      // default, akan di-update AI
-      priority:           'MEDIUM',                   // default, akan di-update AI
-      source:             'telegram_personal',
-      telegram_sent:      false,                      // akan jadi true setelah alert dikirim
+      ticket_id: ticketId,
+      email_id: `TG-DM-${dmData.messageId || Date.now()}`,
+      from: dmData.senderPhone
+        ? `${dmData.senderName} (${dmData.senderPhone})`
+        : dmData.senderName,
+      subject: `[DM Pribadi] Pesan dari ${dmData.senderName}`,
+      body: dmData.messageText,
+      summary: null,                       // diisi AI setelah normalisasi
+      category: 'Incident Management',      // default, akan di-update AI
+      priority: 'MEDIUM',                   // default, akan di-update AI
+      source: 'telegram_personal',
+      telegram_sent: false,                      // akan jadi true setelah alert dikirim
       telegram_message_id: null,
-      telegram_chat_id:   null,
-      status:             'In Progress',
-      processed_at:       dmData.timestamp || new Date().toISOString(),
+      telegram_chat_id: null,
+      status: 'In Progress',
+      processed_at: dmData.timestamp || new Date().toISOString(),
     };
 
     const { error } = await supabase
@@ -338,6 +340,39 @@ export async function getTicketsByDateRange(days = 7) {
   }
 
   return data || [];
+}
+
+/**
+ * Ambil tiket berdasarkan tanggal spesifik dalam timezone WIB (Asia/Jakarta).
+ * @param {string} dateStr - Format YYYY-MM-DD, contoh: '2026-07-15'
+ * @param {number} [limit=15] - Maksimum tiket yang diambil
+ * @returns {Promise<Array>} List tiket
+ */
+export async function getTicketsByDate(dateStr, limit = 15) {
+  try {
+    // Konversi tanggal WIB ke UTC range agar query tepat
+    // WIB = UTC+7, jadi YYYY-MM-DD 00:00 WIB = YYYY-MM-DD-1 17:00 UTC
+    const startWib = new Date(`${dateStr}T00:00:00+07:00`);
+    const endWib = new Date(`${dateStr}T23:59:59+07:00`);
+
+    const { data, error } = await supabase
+      .from('Unified_Ticket_Tracker')
+      .select('ticket_id, subject, summary, priority, status, processed_at, from, category')
+      .gte('processed_at', startWib.toISOString())
+      .lte('processed_at', endWib.toISOString())
+      .order('processed_at', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      console.error(`❌ Gagal mengambil tiket tanggal ${dateStr}:`, error.message);
+      return [];
+    }
+
+    return data || [];
+  } catch (err) {
+    console.error('❌ Unexpected error in getTicketsByDate:', err.message);
+    return [];
+  }
 }
 
 export async function searchTickets(keyword) {
@@ -678,16 +713,16 @@ export async function saveRawIntakeMessage(data) {
     if (sourceChannel === 'telegram_group' || sourceChannel === 'telegram_personal') sourceChannel = 'telegram';
 
     const payload = {
-      source_channel:  sourceChannel,
-      source_ref:      data.source_ref      || null,
-      sender:          data.sender          || null,
-      thread_ref:      data.thread_ref      || null,
-      received_at:     data.received_at     || new Date().toISOString(),
-      body_text:       data.body_text       || null,
-      attachments:     data.attachments || data.attachment || null,
-      raw_payload:     data.raw_payload     || null,
+      source_channel: sourceChannel,
+      source_ref: data.source_ref || null,
+      sender: data.sender || null,
+      thread_ref: data.thread_ref || null,
+      received_at: data.received_at || new Date().toISOString(),
+      body_text: data.body_text || null,
+      attachments: data.attachments || data.attachment || null,
+      raw_payload: data.raw_payload || null,
       idempotency_key: data.idempotency_key || data.idempotency_ref || null,
-      status:          'pending',
+      status: 'pending',
     };
 
     const { data: inserted, error } = await supabase
@@ -732,8 +767,8 @@ export async function markRawMessageAs(rawId, status, ticketId = null, ignoreRea
       .from('intake_message')
       .update({
         status,
-        ticket_id:     ticketId,
-        processed_at:  new Date().toISOString(),
+        ticket_id: ticketId,
+        processed_at: new Date().toISOString(),
         ignore_reason: ignoreReason,
       })
       .eq('id', rawId);
@@ -819,4 +854,49 @@ export async function getPendingRawMessages(limit = 50) {
   }
 }
 
+// Ambil tiket In Progress yang sudah dikonfirmasi dan belum dikirim alarm SLA
+export async function getTicketsNeedingSlaCheck() {
+  const { data, error } = await supabase
+    .from('Unified_Ticket_Tracker')
+    .select('ticket_id, from, subject, priority, severity, category, confirmed_at, sla_warned, sla_alerted, sla_deadline_minutes, telegram_chat_id, telegram_message_id')
+    .eq('status', 'In Progress')
+    .not('confirmed_at', 'is', null)
+    .eq('sla_alerted', false)
+    .order('confirmed_at', { ascending: true });
 
+  if (error) { console.error('SLA check query error:', error.message); return []; }
+  return data || [];
+}
+
+// Set flag SLA (warn = peringatan awal, alert = alarm kritis) agar tidak double-kirim
+export async function markSlaFlag(ticketId, level) {
+  const field = level === 'warn' ? { sla_warned: true } : { sla_alerted: true };
+  const { error } = await supabase.from('Unified_Ticket_Tracker').update(field).eq('ticket_id', ticketId);
+  if (error) console.error(`Gagal set SLA flag [${level}] tiket ${ticketId}:`, error.message);
+  return !error;
+}
+
+// ── SLA KONFIRMASI: Ambil tiket Pending Confirmation yang intake_received_at sudah ada
+// Digunakan oleh slaWorker checkSlaConfirmation() untuk Looping 1 (15 Menit)
+export async function getTicketsNeedingConfirmationCheck() {
+  const { data, error } = await supabase
+    .from('Unified_Ticket_Tracker')
+    .select('ticket_id, from, subject, priority, severity, intake_received_at, sla_confirm_warned, sla_confirm_alerted, telegram_chat_id, telegram_message_id')
+    .eq('status', 'Pending Confirmation')
+    .not('intake_received_at', 'is', null)
+    .eq('sla_confirm_alerted', false)   // belum pernah dikirim alert konfirmasi
+    .order('intake_received_at', { ascending: true });
+
+  if (error) { console.error('SLA Konfirmasi check query error:', error.message); return []; }
+  return data || [];
+}
+
+// Set flag SLA Konfirmasi (confirm_warn / confirm_alert)
+export async function markSlaConfirmFlag(ticketId, level) {
+  const field = level === 'warn'
+    ? { sla_confirm_warned: true }
+    : { sla_confirm_alerted: true };
+  const { error } = await supabase.from('Unified_Ticket_Tracker').update(field).eq('ticket_id', ticketId);
+  if (error) console.error(`Gagal set SLA Konfirmasi flag [${level}] tiket ${ticketId}:`, error.message);
+  return !error;
+}
