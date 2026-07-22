@@ -570,6 +570,18 @@ function initTelegramBot() {
         return;
       }
 
+      // -- Tandai tiket Done dari Beacon --
+      if (data.startsWith('done_ticket_')) {
+        await handleBeaconDone(query, chatId, data.replace('done_ticket_', ''));
+        return;
+      }
+
+      // -- Tandai tiket No Action dari Beacon --
+      if (data.startsWith('noaction_ticket_')) {
+        await handleBeaconNoAction(query, chatId, data.replace('noaction_ticket_', ''));
+        return;
+      }
+
       // ── Pilih tiket dari hasil pencarian /edit keyword (prefix: select_ticket_) ──
       if (data.startsWith('select_ticket_')) {
         const ticketId = data.replace('select_ticket_', '');
@@ -1013,6 +1025,10 @@ async function handleTicketConfirm(query, chatId, ticketId) {
         reply_markup: {
           inline_keyboard: [
             [
+              { text: '✅ Done', callback_data: `done_ticket_${ticketId}` },
+              { text: '🚫 No Action', callback_data: `noaction_ticket_${ticketId}` },
+            ],
+            [
               { text: '✏️ Edit Tiket', callback_data: `edit_beacon_ticket_${ticketId}` },
               { text: '⬆️ Eskalasi', callback_data: `escalate_ticket_${ticketId}` },
             ]
@@ -1235,6 +1251,92 @@ async function handleBeaconEscalate(query, chatId, ticketId) {
     console.log(`[Escalate] Tiket ${ticketId} dieskala oleh ${by}`);
   } catch (err) {
     console.error('handleBeaconEscalate error:', err.message);
+    await bot.answerCallbackQuery(query.id, { text: 'Terjadi kesalahan. Coba lagi.', show_alert: true });
+  }
+}
+
+// ================== HANDLER: DONE TIKET DARI BEACON ==================
+async function handleBeaconDone(query, chatId, ticketId) {
+  try {
+    const by = query.from?.first_name || query.from?.username || 'L1';
+    const now = new Date().toISOString();
+    const doneTime = new Date(now).toLocaleString('id-ID', {
+      timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
+      year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+
+    await updateTicket(ticketId, {
+      status: 'Done',
+      resolved_at: now,
+      resolved_by: by,
+    });
+
+    // Hapus tombol dari pesan tiket
+    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+      chat_id: chatId,
+      message_id: query.message.message_id,
+    }).catch(() => {});
+
+    // Kirim notifikasi Done ke Beacon
+    await bot.sendMessage(chatId,
+      `✅ <b>TIKET SELESAI (Done)</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n` +
+      `🎫 Ticket ID      : <code>${escapeHTML(ticketId)}</code>\n` +
+      `👤 Diselesaikan   : <b>${escapeHTML(by)}</b>\n` +
+      `⏰ Waktu          : ${escapeHTML(doneTime)}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n` +
+      `📋 Status         : ✅ Done\n` +
+      `<i>Tiket telah ditandai selesai dan SLA dihentikan.</i>`,
+      { parse_mode: 'HTML', reply_to_message_id: query.message.message_id }
+    ).catch(() => {});
+
+    await bot.answerCallbackQuery(query.id, { text: `✅ Tiket ${ticketId} ditandai Done!`, show_alert: true });
+    console.log(`[Done] Tiket ${ticketId} diselesaikan oleh ${by}`);
+  } catch (err) {
+    console.error('handleBeaconDone error:', err.message);
+    await bot.answerCallbackQuery(query.id, { text: 'Terjadi kesalahan. Coba lagi.', show_alert: true });
+  }
+}
+
+// ================== HANDLER: NO ACTION TIKET DARI BEACON ==================
+async function handleBeaconNoAction(query, chatId, ticketId) {
+  try {
+    const by = query.from?.first_name || query.from?.username || 'L1';
+    const now = new Date().toISOString();
+    const noActionTime = new Date(now).toLocaleString('id-ID', {
+      timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
+      year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+
+    await updateTicket(ticketId, {
+      status: 'No Action',
+      resolved_at: now,
+      resolved_by: by,
+    });
+
+    // Hapus tombol dari pesan tiket
+    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+      chat_id: chatId,
+      message_id: query.message.message_id,
+    }).catch(() => {});
+
+    // Kirim notifikasi No Action ke Beacon
+    await bot.sendMessage(chatId,
+      `🚫 <b>TIKET — TIDAK ADA TINDAKAN (No Action)</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n` +
+      `🎫 Ticket ID      : <code>${escapeHTML(ticketId)}</code>\n` +
+      `👤 Ditandai oleh  : <b>${escapeHTML(by)}</b>\n` +
+      `⏰ Waktu          : ${escapeHTML(noActionTime)}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n` +
+      `📋 Status         : 🚫 No Action\n` +
+      `<i>Tiket ini tidak memerlukan tindakan lebih lanjut.</i>`,
+      { parse_mode: 'HTML', reply_to_message_id: query.message.message_id }
+    ).catch(() => {});
+
+    await bot.answerCallbackQuery(query.id, { text: `🚫 Tiket ${ticketId} ditandai No Action.`, show_alert: true });
+    console.log(`[NoAction] Tiket ${ticketId} ditandai No Action oleh ${by}`);
+  } catch (err) {
+    console.error('handleBeaconNoAction error:', err.message);
     await bot.answerCallbackQuery(query.id, { text: 'Terjadi kesalahan. Coba lagi.', show_alert: true });
   }
 }
@@ -1590,6 +1692,10 @@ async function sendFinalTicketToBeacon(ticket, beaconChatId, status = 'In Progre
     keyboard = {
       reply_markup: {
         inline_keyboard: [
+          [
+            { text: '✅ Done', callback_data: `done_ticket_${ticket.ticket_id}` },
+            { text: '🚫 No Action', callback_data: `noaction_ticket_${ticket.ticket_id}` },
+          ],
           [
             { text: '✏️ Edit Tiket', callback_data: `edit_beacon_ticket_${ticket.ticket_id}` },
             { text: '⬆️ Eskalasi', callback_data: `escalate_ticket_${ticket.ticket_id}` },

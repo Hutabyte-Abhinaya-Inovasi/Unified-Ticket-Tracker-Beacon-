@@ -121,12 +121,10 @@ export async function processRawMessage(rawMsg) {
   console.log(`\n⚙️  [processRawMessage] id=${rawMsg.id} | channel=${sourceChannel} | group=${groupName} | dari=${senderName}`);
   console.log(`   Teks: ${text.substring(0, 80)}${text.length > 80 ? '...' : ''}`);
 
-  // ── STEP 1: Small talk filter (tanpa AI, cepat) ──────────────────────────
-  if (isSmallTalk(text)) {
-    console.log(`   🟡 Diabaikan: small talk`);
-    await markRawMessageAs(rawMsg.id, 'ignored', null, 'small_talk');
-    return { action: 'ignored', reason: 'small_talk' };
-  }
+
+  // ── STEP 1: Small talk filter ─ DINONAKTIFKAN (semua pesan diproses) ──────
+  // Semua pesan dari grup yang dimonitor akan diproses sebagai kandidat tiket.
+
 
   // ── STEP 2: Thread-ref lookup (langsung dari quote/reply WA) ─────────────
   // Jika pesan me-reply/quote pesan lain, cari tiket via idempotency_ref
@@ -156,7 +154,8 @@ export async function processRawMessage(rawMsg) {
     console.log(`   ↩️  thread_ref tidak cocok dengan tiket aktif — lanjut AI check`);
   }
 
-  // ── STEP 3: AI relevance check ───────────────────────────────────────────
+  // ── STEP 3: AI analysis ─ untuk metadata tiket (summary, kategori, prioritas) ─
+  // AI dijalankan untuk mengisi data tiket, tapi TIDAK memblokir pembuatan tiket.
   let analysis = {};
   try {
     analysis = await analyzeEmail({
@@ -165,14 +164,15 @@ export async function processRawMessage(rawMsg) {
       source:  sourceChannel,
     });
   } catch (err) {
-    console.warn(`   ⚠️  AI relevance check error: ${err.message} — fallback: anggap relevan`);
+    console.warn(`   ⚠️  AI analysis error: ${err.message} — fallback: default metadata`);
     analysis = { isRelevant: true, shouldProcess: true, confidence_score: 70 };
   }
 
+  // Semua pesan tetap diproses walau AI menilai tidak relevan
   if (!analysis.isRelevant || !analysis.shouldProcess) {
-    console.log(`   🟡 Diabaikan: tidak relevan (AI) — ${analysis.reason || ''}`);
-    await markRawMessageAs(rawMsg.id, 'ignored', null, 'not_relevant');
-    return { action: 'ignored', reason: 'not_relevant' };
+    console.log(`   ℹ️  AI menilai kurang relevan (${analysis.reason || ''}) — tetap diproses sebagai kandidat tiket`);
+    // Paksa confidence rendah agar tombol Approve/Reject tetap muncul
+    analysis = { ...analysis, isRelevant: true, shouldProcess: true, confidence_score: 50 };
   }
 
   // ── STEP 4: Cari tiket aktif di grup/channel yang sama ───────────────────
@@ -199,8 +199,8 @@ export async function processRawMessage(rawMsg) {
         );
         if (isRelated) matchedTicket = activeTickets[0];
       } catch (err) {
-        console.warn(`   ⚠️  checkMessageRelevance error: ${err.message} — fallback: anggap terkait`);
-        matchedTicket = activeTickets[0];
+        console.warn(`   ⚠️  checkMessageRelevance error: ${err.message} — lanjut buat tiket baru`);
+        // Jika AI gagal, tidak diasumsikan terkait → buat tiket baru
       }
     } else {
       // >1 tiket aktif → AI routing
@@ -210,8 +210,8 @@ export async function processRawMessage(rawMsg) {
           matchedTicket = activeTickets.find(t => t.ticket_id === matchedId) || null;
         }
       } catch (err) {
-        console.warn(`   ⚠️  routeMessageToActiveTickets error: ${err.message} — fallback: tiket terbaru`);
-        matchedTicket = activeTickets[0];
+        console.warn(`   ⚠️  routeMessageToActiveTickets error: ${err.message} — lanjut buat tiket baru`);
+        // Jika AI gagal, tidak diasumsikan ke tiket terbaru → buat tiket baru
       }
     }
 
