@@ -32,10 +32,10 @@ const SLA_MINUTES = {
 
 // ── LOOPING 1: Batas waktu SLA Konfirmasi ────────────────────────────────
 const SLA_CONFIRM_MINUTES      = 15;  // batas konfirmasi 15 menit
-const SLA_CONFIRM_WARN_MINUTES = 5;   // warn saat sudah 5 menit belum dikonfirmasi (memberikan sisa 10 menit agar tidak mepet)
+const SLA_CONFIRM_WARN_MINUTES = 9;   // warn saat sudah 9 menit belum dikonfirmasi (memberikan sisa 6 menit agar tidak mepet)
 
-// Peringatan SLA Pekerjaan dikirim saat sisa waktu <= 10 menit
-const WARN_MINUTES_REMAINING = 10;
+// Peringatan SLA Pekerjaan dikirim saat sisa waktu <= 6 menit
+const WARN_MINUTES_REMAINING = 6;
 // Alarm SLA Pekerjaan dikirim saat elapsed >= 100% batas waktu
 const ALERT_RATIO = 1.0;
 
