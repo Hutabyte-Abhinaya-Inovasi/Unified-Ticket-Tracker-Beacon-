@@ -1880,12 +1880,7 @@ async function sendIncidentAlert(email, analysis = {}, customMessage = null) {
     telegramChatId = sent.chat.id.toString();
     console.log(`Alert terkirim ke Beacon (msg: ${telegramMessageId})`);
   } catch (err) {
-<<<<<<< HEAD
-    console.error("⚠️ Gagal mengirim notifikasi alert ke Telegram:", err.message);
-    // Jangan hentikan proses, biarkan tiket tetap tersimpan di database.
-=======
-    console.error('Gagal kirim alert ke Beacon:', err.message);
->>>>>>> input_manual_tele
+    console.error('⚠️ Gagal mengirim notifikasi alert ke Beacon:', err.message);
   }
 
   const dbChatId = email.group_id && telegramChatId
