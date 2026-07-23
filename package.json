@@ -12,6 +12,7 @@
   },
   "license": "ISC",
   "dependencies": {
+    "@azure/msal-node": "^5.4.2",
     "@huggingface/inference": "^4.13.23",
     "@supabase/supabase-js": "^2.78.0",
     "@whiskeysockets/baileys": "^6.7.7",

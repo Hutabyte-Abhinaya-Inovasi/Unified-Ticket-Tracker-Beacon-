@@ -1,165 +1,206 @@
-// src/infrastructure/outlook/outlookService.js
-
-import Imap from "imap";
-import { simpleParser } from "mailparser";
-//import { analyzeEmail } from "../ai/openaiService.js";
-//import { sendIncidentAlert } from "../telegram/telegramService.js";
-//import { saveEmailLog } from "../../database/supabase.js";
-import { env } from "../../config/env.js";
+import "dotenv/config";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { PublicClientApplication } from "@azure/msal-node";
 import { saveRawIntakeMessage } from "../../database/supabase.js";
-const imapConfig = {
-  user: env.EMAIL_USER,
-  password: env.EMAIL_PASS,
-  host: env.EMAIL_HOST,
-  port: Number(env.EMAIL_PORT),
-  tls: env.EMAIL_SECURE,
-  tlsOptions: { rejectUnauthorized: true },  
-  authTimeout: 30000,
-  keepalive: true,
-  keepaliveInterval: 30000,
+import { processRawMessage } from "../../usecases/processRawMessage.js";
+
+const enabled = String(process.env.OUTLOOK_ENABLED || "false").toLowerCase() === "true";
+const tenantId = process.env.AZURE_TENANT_ID;
+const clientId = process.env.AZURE_CLIENT_ID;
+const pollIntervalMs = Number(process.env.OUTLOOK_POLL_INTERVAL_MS || 60000);
+const expectedMailbox = (process.env.OUTLOOK_MAILBOX || "").toLowerCase();
+const cachePath = path.resolve("auth_info", "outlook-msal-cache.json");
+const scopes = ["User.Read", "Mail.Read"];
+
+let pollTimer = null;
+let pollRunning = false;
+
+const cachePlugin = {
+  beforeCacheAccess: async (context) => {
+    try {
+      const cache = await fs.readFile(cachePath, "utf8");
+      context.tokenCache.deserialize(cache);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  },
+  afterCacheAccess: async (context) => {
+    if (!context.cacheHasChanged) return;
+    await fs.mkdir(path.dirname(cachePath), { recursive: true });
+    await fs.writeFile(cachePath, context.tokenCache.serialize(), "utf8");
+  },
 };
 
-let imap = null;
-let reconnectAttempts = 0;
-let reconnectTimer = null;
-
-function getReconnectDelay() {
-  const delay = Math.min(5000 * Math.pow(2, reconnectAttempts), 60000);
-  return delay + Math.random() * 1000;
-}
-
-function scheduleReconnect() {
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  const delay = getReconnectDelay();
-  console.log(`⏳ Reconnecting IMAP in ${Math.round(delay/1000)}s (attempt ${reconnectAttempts + 1})`);
-  
-  reconnectTimer = setTimeout(() => {
-    reconnectAttempts++;
-    connectIMAP();
-  }, delay);
-}
-
-console.log("IMAP Config:", {
-  host: imapConfig.host,
-  port: imapConfig.port,
-  tls: imapConfig.tls,
-  user: imapConfig.user,
-});
-
-function connectIMAP() {
-  console.log("🚀 Connecting to Outlook IMAP...");
-
-  if (imap) {
-    try { imap.end(); } catch {}
-  }
-  
-  console.log("env.EMAIL_SECURE =", env.EMAIL_SECURE);
-  imap = new Imap(imapConfig);
-
-  imap.once("ready", () => {
-    console.log("✅ IMAP Connected successfully!");
-    reconnectAttempts = 0;
-    openInbox();
-  });
-
-  imap.on("error", (err) => {
-    console.error("❌ IMAP Error:", err.message);
-    if (err.message.includes("authentication") || err.message.includes("login")) {
-      console.error("💡 Saran: Pastikan menggunakan App Password (bukan password biasa) di .env");
-    }
-     console.error("message:", err?.message);
-    console.error("source:", err?.source);
-    console.error("code:", err?.code);
-    console.error("stack:", err?.stack);
-    scheduleReconnect();
-  });
-
-  imap.on("end", () => {
-    console.log("📴 IMAP connection ended");
-    scheduleReconnect();
-  });
-
-  imap.connect();
-}
-
-function openInbox() {
-  imap.openBox("INBOX", false, (err) => {
-    if (err) {
-      console.error("❌ Gagal buka INBOX:", err.message);
-      return scheduleReconnect();
-    }
-    console.log("📬 INBOX opened");
-    fetchUnread();
-    imap.on("mail", () => fetchUnread());
+function createMsalClient() {
+  return new PublicClientApplication({
+    auth: {
+      clientId,
+      authority: `https://login.microsoftonline.com/${tenantId}`,
+    },
+    cache: { cachePlugin },
   });
 }
 
-function fetchUnread() {
-  imap.search(["UNSEEN"], (err, results) => {
-    if (err) {
-        console.error(err);
-        return;
-    }
+const msalClient = createMsalClient();
 
-    console.log("UNSEEN results:", results);
+async function getAccessToken() {
+  const accounts = await msalClient.getTokenCache().getAllAccounts();
 
-    if (!results?.length) {
-        console.log("Tidak ada email UNSEEN");
-        return;
-    }
-
-    const f = imap.fetch(results, {
-      bodies: "",
-      markSeen: false, // ubah ke true nanti kalau sudah production
-    });
-
-    f.on("message", (msg, seqno) => {
-      msg.on("body", async (stream) => {
-        try {
-          const parsed = await simpleParser(stream);
-          console.log("📨 Email masuk");
-          console.log("Subject :", parsed.subject);
-          console.log("From    :", parsed.from?.text);
-          console.log("Date    :", parsed.date);
-          await saveRawIntakeMessage({
-              source_channel: "email",
-              source_ref: parsed.messageId,
-              sender: parsed.from?.text || "Unknown",
-              thread_ref: parsed.messageId,
-              received_at: parsed.date,
-              body_text: parsed.text,
-              attachments: {
-                  count: parsed.attachments?.length || 0,
-              },
-              raw_payload: parsed,
-              idempotency_key: `email-${parsed.messageId}`,
-          });
-          console.log("✅ Email berhasil disimpan ke raw_intake_messages");
-        } catch (err) {
-          console.error("❌ Error processing email:", err.message);
-        }
+  if (accounts.length > 0) {
+    try {
+      const result = await msalClient.acquireTokenSilent({
+        account: accounts[0],
+        scopes,
       });
-    });
-    f.once("error", (err) => {
-      console.error("Fetch error:", err);
-    });
+      return result.accessToken;
+    } catch (error) {
+      console.warn(`⚠️ Token Outlook lama tidak dapat dipakai: ${error.message}`);
+    }
+  }
 
-    f.once("end", () => {
-      console.log("✅ Selesai memproses batch email");
-    });
-
+  const result = await msalClient.acquireTokenByDeviceCode({
+    scopes,
+    deviceCodeCallback: (response) => {
+      console.log("\n🔐 Login Microsoft 365 diperlukan");
+      console.log(response.message);
+    },
   });
 
+  if (!result?.accessToken) {
+    throw new Error("Microsoft 365 tidak mengembalikan access token");
+  }
 
+  const signedInMailbox = (result.account?.username || "").toLowerCase();
+  console.log(`✅ Login Microsoft 365 berhasil: ${result.account?.username || "akun Outlook"}`);
+  if (expectedMailbox && signedInMailbox && signedInMailbox !== expectedMailbox) {
+    console.warn(`⚠️ Akun login ${signedInMailbox} berbeda dari OUTLOOK_MAILBOX=${expectedMailbox}`);
+  }
+  return result.accessToken;
 }
 
+async function graphRequest(token, url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Prefer: 'outlook.body-content-type="text"',
+      ...(options.headers || {}),
+    },
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Microsoft Graph ${response.status}: ${detail}`);
+  }
+
+  if (response.status === 204) return null;
+  return response.json();
+}
+
+async function getUnreadMessages(token) {
+  const url = new URL("https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages");
+  url.searchParams.set("$filter", "isRead eq false");
+  url.searchParams.set("$orderby", "receivedDateTime asc");
+  url.searchParams.set("$top", "10");
+  url.searchParams.set(
+    "$select",
+    "id,internetMessageId,conversationId,subject,from,receivedDateTime,body,bodyPreview,hasAttachments"
+  );
+
+  const data = await graphRequest(token, url.toString());
+  return data?.value || [];
+}
+
+async function markMessageAsRead(token, messageId) {
+  await graphRequest(
+    token,
+    `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ isRead: true }),
+    }
+  );
+}
+
+async function processOutlookMessage(token, message) {
+  const senderName = message.from?.emailAddress?.name || "Unknown";
+  const senderAddress = message.from?.emailAddress?.address || "unknown";
+  const subject = message.subject || "(Tanpa subjek)";
+  const body = message.body?.content || message.bodyPreview || "";
+
+  const rawPayload = {
+    source_channel: "email",
+    source_ref: `outlook:${message.conversationId || senderAddress}`,
+    sender: `${senderName} (${senderAddress})`,
+    received_at: message.receivedDateTime || new Date().toISOString(),
+    body_text: `Subject: ${subject}\n\n${body}`.trim(),
+    attachments: message.hasAttachments ? { has_attachments: true } : null,
+    raw_payload: {
+      provider: "microsoft365",
+      group_name: subject,
+      graph_message_id: message.id,
+      internet_message_id: message.internetMessageId,
+      conversation_id: message.conversationId,
+    },
+    idempotency_key: `outlook:${message.id}`,
+  };
+
+  const inserted = await saveRawIntakeMessage(rawPayload);
+  if (!inserted) {
+    console.warn(`⚠️ Email tidak disimpan, sehingga belum ditandai read: ${subject}`);
+    return;
+  }
+
+  await processRawMessage({ ...rawPayload, ...inserted });
+  // Email tidak ditandai sudah dibaca karena permission hanya Mail.Read.
+  console.log(`✅ Email Outlook selesai diproses: ${subject}`);
+}
+
+async function pollOutlook() {
+  if (pollRunning) return;
+  pollRunning = true;
+
+  try {
+    const token = await getAccessToken();
+    const messages = await getUnreadMessages(token);
+
+    if (messages.length > 0) {
+      console.log(`📬 Ditemukan ${messages.length} email Outlook unread`);
+    }
+
+    for (const message of messages) {
+      try {
+        await processOutlookMessage(token, message);
+      } catch (error) {
+        console.error(`❌ Gagal memproses email Outlook: ${error.message}`);
+      }
+    }
+  } catch (error) {
+    console.error(`❌ Outlook listener error: ${error.message}`);
+  } finally {
+    pollRunning = false;
+  }
+}
 
 export function startOutlookListener() {
-  connectIMAP();
+  if (!enabled) {
+    console.log("⏭️ Outlook listener nonaktif (OUTLOOK_ENABLED=false)");
+    return;
+  }
+
+  if (!tenantId || !clientId) {
+    console.error("❌ AZURE_TENANT_ID atau AZURE_CLIENT_ID belum diisi");
+    return;
+  }
+
+  console.log(`📧 Microsoft 365 Outlook Listener aktif (${pollIntervalMs / 1000} detik)`);
+  void pollOutlook();
+  pollTimer = setInterval(() => void pollOutlook(), pollIntervalMs);
 }
 
 export function stopOutlookListener() {
-  if (imap) imap.end();
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
 }
-
-// untuk email dari outlook diabaikan saja ! 

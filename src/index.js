@@ -41,7 +41,7 @@ async function start() {
     console.log("⏰ Memulai SLA Worker...");
     startSlaWorker();
 
-    console.log("📧 Memulai Outlook IMAP Listener...");
+    console.log("📧 Memulai Microsoft 365 Outlook Listener...");
     startOutlookListener();
 
     console.log("📡 Memulai Intake Listener...");
