@@ -1265,6 +1265,9 @@ async function handleBeaconDone(query, chatId, ticketId) {
       year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
     });
 
+    // Ambil data tiket sebelum update agar group_id & body tersedia untuk notif balik
+    const ticket = await getTicketById(ticketId);
+
     await updateTicket(ticketId, {
       status: 'Done',
       resolved_at: now,
@@ -1292,6 +1295,48 @@ async function handleBeaconDone(query, chatId, ticketId) {
 
     await bot.answerCallbackQuery(query.id, { text: `✅ Tiket ${ticketId} ditandai Done!`, show_alert: true });
     console.log(`[Done] Tiket ${ticketId} diselesaikan oleh ${by}`);
+
+    // ── Kirim notifikasi balik ke grup asal / DM pengirim tiket ──
+    try {
+      if (ticket && ticket.group_id) {
+        // group_id bisa berformat "chatId|groupId", ambil bagian pertama
+        const originChatId = ticket.group_id.split('|')[0].trim();
+
+        // Hanya kirim untuk sumber Telegram (bukan WhatsApp / email)
+        const tgSources = ['telegram', 'telegram_manual', 'telegram_personal', 'telegram_group'];
+        const isTelegramSource = tgSources.includes((ticket.source || '').toLowerCase());
+
+        if (isTelegramSource && originChatId) {
+          // Potong isi tiket agar tidak terlalu panjang
+          const maxBodyLen = 300;
+          const rawBody = (ticket.body || ticket.summary || '-');
+          const ticketBody = rawBody.length > maxBodyLen
+            ? rawBody.substring(0, maxBodyLen) + '...'
+            : rawBody;
+
+          const notifMsg =
+            `✅ Halo! Tiket kamu dengan isi berikut:\n\n` +
+            `<i>"${escapeHTML(ticketBody)}"</i>\n\n` +
+            `Sudah selesai ya 🎉\n\n` +
+            `🎫 Ticket ID : <code>${escapeHTML(ticketId)}</code>\n` +
+            `👤 Diselesaikan oleh : <b>${escapeHTML(by)}</b>\n` +
+            `⏰ Waktu : ${escapeHTML(doneTime)}`;
+
+          await bot.sendMessage(originChatId, notifMsg, { parse_mode: 'HTML' })
+            .catch((sendErr) => {
+              console.warn(`[Done] Gagal kirim notif ke grup asal ${originChatId}:`, sendErr.message);
+            });
+
+          console.log(`[Done] ✅ Notif balik terkirim ke grup asal: ${originChatId}`);
+        } else {
+          console.log(`[Done] Notif balik dilewati — sumber bukan Telegram (source: ${ticket?.source || 'unknown'})`);
+        }
+      } else {
+        console.log(`[Done] Notif balik dilewati — group_id tidak tersedia untuk tiket ${ticketId}`);
+      }
+    } catch (notifErr) {
+      console.warn(`[Done] Gagal mengirim notif balik ke pengirim tiket ${ticketId}:`, notifErr.message);
+    }
   } catch (err) {
     console.error('handleBeaconDone error:', err.message);
     await bot.answerCallbackQuery(query.id, { text: 'Terjadi kesalahan. Coba lagi.', show_alert: true });
