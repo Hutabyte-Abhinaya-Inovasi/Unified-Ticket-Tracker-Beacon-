@@ -40,6 +40,14 @@ import {
   updateIncidentStatusAndMessage,
 } from '../infrastructure/telegram/telegramService.js';
 
+import {
+  pushTicketToClickUp,
+} from '../infrastructure/clickup/clickupService.js';
+
+import {
+  updateTicket,
+} from '../database/supabase.js';
+
 // ─── Keyword heuristik untuk pesan balasan singkat ───────────────────────────
 const REPLY_KEYWORDS = [
   "baik", "oke", "ok", "siap", "aman", "done", "proses",
@@ -113,12 +121,10 @@ export async function processRawMessage(rawMsg) {
   console.log(`\n⚙️  [processRawMessage] id=${rawMsg.id} | channel=${sourceChannel} | group=${groupName} | dari=${senderName}`);
   console.log(`   Teks: ${text.substring(0, 80)}${text.length > 80 ? '...' : ''}`);
 
-  // ── STEP 1: Small talk filter (tanpa AI, cepat) ──────────────────────────
-  if (isSmallTalk(text)) {
-    console.log(`   🟡 Diabaikan: small talk`);
-    await markRawMessageAs(rawMsg.id, 'ignored', null, 'small_talk');
-    return { action: 'ignored', reason: 'small_talk' };
-  }
+
+  // ── STEP 1: Small talk filter ─ DINONAKTIFKAN (semua pesan diproses) ──────
+  // Semua pesan dari grup yang dimonitor akan diproses sebagai kandidat tiket.
+
 
   // ── STEP 2: Thread-ref lookup (langsung dari quote/reply WA) ─────────────
   // Jika pesan me-reply/quote pesan lain, cari tiket via idempotency_ref
@@ -148,7 +154,8 @@ export async function processRawMessage(rawMsg) {
     console.log(`   ↩️  thread_ref tidak cocok dengan tiket aktif — lanjut AI check`);
   }
 
-  // ── STEP 3: AI relevance check ───────────────────────────────────────────
+  // ── STEP 3: AI analysis ─ untuk metadata tiket (summary, kategori, prioritas) ─
+  // AI dijalankan untuk mengisi data tiket, tapi TIDAK memblokir pembuatan tiket.
   let analysis = {};
   try {
     analysis = await analyzeEmail({
@@ -157,14 +164,15 @@ export async function processRawMessage(rawMsg) {
       source:  sourceChannel,
     });
   } catch (err) {
-    console.warn(`   ⚠️  AI relevance check error: ${err.message} — fallback: anggap relevan`);
+    console.warn(`   ⚠️  AI analysis error: ${err.message} — fallback: default metadata`);
     analysis = { isRelevant: true, shouldProcess: true, confidence_score: 70 };
   }
 
+  // Semua pesan tetap diproses walau AI menilai tidak relevan
   if (!analysis.isRelevant || !analysis.shouldProcess) {
-    console.log(`   🟡 Diabaikan: tidak relevan (AI) — ${analysis.reason || ''}`);
-    await markRawMessageAs(rawMsg.id, 'ignored', null, 'not_relevant');
-    return { action: 'ignored', reason: 'not_relevant' };
+    console.log(`   ℹ️  AI menilai kurang relevan (${analysis.reason || ''}) — tetap diproses sebagai kandidat tiket`);
+    // Paksa confidence rendah agar tombol Approve/Reject tetap muncul
+    analysis = { ...analysis, isRelevant: true, shouldProcess: true, confidence_score: 50 };
   }
 
   // ── STEP 4: Cari tiket aktif di grup/channel yang sama ───────────────────
@@ -191,8 +199,8 @@ export async function processRawMessage(rawMsg) {
         );
         if (isRelated) matchedTicket = activeTickets[0];
       } catch (err) {
-        console.warn(`   ⚠️  checkMessageRelevance error: ${err.message} — fallback: anggap terkait`);
-        matchedTicket = activeTickets[0];
+        console.warn(`   ⚠️  checkMessageRelevance error: ${err.message} — lanjut buat tiket baru`);
+        // Jika AI gagal, tidak diasumsikan terkait → buat tiket baru
       }
     } else {
       // >1 tiket aktif → AI routing
@@ -202,8 +210,8 @@ export async function processRawMessage(rawMsg) {
           matchedTicket = activeTickets.find(t => t.ticket_id === matchedId) || null;
         }
       } catch (err) {
-        console.warn(`   ⚠️  routeMessageToActiveTickets error: ${err.message} — fallback: tiket terbaru`);
-        matchedTicket = activeTickets[0];
+        console.warn(`   ⚠️  routeMessageToActiveTickets error: ${err.message} — lanjut buat tiket baru`);
+        // Jika AI gagal, tidak diasumsikan ke tiket terbaru → buat tiket baru
       }
     }
 
@@ -237,7 +245,7 @@ export async function processRawMessage(rawMsg) {
     console.log(`   📋 Tidak ada tiket aktif yang cocok → buat tiket baru`);
   }
 
-  // ── STEP 6: Buat tiket baru ───────────────────────────────────────────────
+  // ── STEP 6: Buat tiket baru ────────────────────────────────────────────
   const ticketId = await generateTicketId();
   console.log(`   🆕 Membuat tiket baru: ${ticketId}`);
 
@@ -253,12 +261,58 @@ export async function processRawMessage(rawMsg) {
     group_name: groupName,
   };
 
-  // Kirim alert ke Telegram + simpan ke Unified_Ticket_Tracker via saveEmailLog
-  await sendIncidentAlert(emailObj, analysis);
+  // Semua tiket baru masuk ke status "Pending Confirmation" — L1 harus approve
+  // Confidence score sengaja disetel rendah (< 80) agar alert menampilkan tombol
+  // [Approve] dan [Reject] bukan tombol status biasa.
+  const pendingAnalysis = {
+    ...analysis,
+    confidence_score: analysis.confidence_score !== undefined
+      ? Math.min(analysis.confidence_score, 79)  // paksa < 80 agar muncul tombol L1
+      : 70,
+  };
+
+  // Kirim alert ke Telegram (dengan tombol Approve/Reject untuk L1)
+  // → saveEmailLog dipanggil di dalam sendIncidentAlert
+  await sendIncidentAlert(emailObj, pendingAnalysis);
 
   // Mark raw sebagai processed & link ke tiket baru
+  // (ClickUp akan dipush setelah L1 approve via callback handleStatusChange)
   await markRawMessageAs(rawMsg.id, 'processed', ticketId);
 
-  console.log(`   ✅ Tiket baru berhasil dibuat: ${ticketId}`);
+  console.log(`   ✅ Tiket baru berhasil dibuat: ${ticketId} (menunggu konfirmasi L1)`);
   return { action: 'created', ticketId };
+}
+
+// ────────────────────────────────────────────────────────────────────
+// HANDLER: L1 Approve → auto-push ke ClickUp
+// Dipanggil dari telegramService.handleStatusChange saat L1 klik "Approve"
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * Dipanggil setelah L1 mengklik "Approve" (Konfirmasi).
+ * Mengubah status tiket dari "Pending Confirmation" ke "In Progress"
+ * dan mengirim tiket ke ClickUp secara otomatis.
+ *
+ * @param {Object} ticket  - Row Unified_Ticket_Tracker yang baru saja diapprove
+ */
+export async function handleL1Approve(ticket) {
+  console.log(`✅ [L1 Approve] Tiket ${ticket.ticket_id} dikonfirmasi, push ke ClickUp...`);
+
+  try {
+    const clickupResult = await pushTicketToClickUp(ticket);
+
+    if (clickupResult) {
+      // Simpan clickup_task_id dan clickup_url ke Supabase
+      await updateTicket(ticket.ticket_id, {
+        clickup_task_id: clickupResult.clickup_task_id,
+        clickup_url:     clickupResult.clickup_url,
+      });
+      console.log(`📋 [ClickUp] Task berhasil: ${clickupResult.clickup_url}`);
+    } else {
+      console.warn(`⚠️  ClickUp push dilewati (API Key atau List ID belum dikonfigurasi).`);
+    }
+  } catch (err) {
+    console.error(`❌ [L1 Approve] Gagal push ke ClickUp:`, err.message);
+    // Tidak throw — L1 approve tetap berlaku walau ClickUp gagal
+  }
 }

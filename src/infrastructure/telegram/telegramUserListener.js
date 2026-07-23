@@ -21,7 +21,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 import { env } from '../../config/env.js';
-import { saveRawIntakeMessage } from '../../database/supabase.js';
+import { saveRawIntakeMessage, supabase } from '../../database/supabase.js';
 import { extractTicketFields } from '../ai/openaiService.js';
 import { sendIncidentAlert } from './telegramService.js';
 import { processRawMessage } from '../../usecases/processRawMessage.js';
@@ -115,6 +115,117 @@ function isInteractiveEnvironment() {
   if (process.env.NON_INTERACTIVE === 'true') return false;
   // Di lokal selalu anggap interaktif
   return true;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// REPLAY: Proses DM yang masuk saat listener offline
+// Mengambil pesan dari 24 jam terakhir dan memproses yang belum ada
+// di Supabase (dicek via idempotency_key). Aman dijalankan berulang
+// karena idempotency_key mencegah duplikasi.
+// ──────────────────────────────────────────────────────────────────
+async function replayMissedDMs(client, me, displayName, phoneNumber) {
+  console.log(`\n🔄 Memeriksa DM yang terlewat saat listener offline...`);
+  const cutoffDate = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 jam lalu
+  const myId = me.id?.toString();
+  let replayCount = 0;
+
+  try {
+    const dialogs = await client.getDialogs({ limit: 30 });
+
+    for (const dialog of dialogs) {
+      // Hanya proses private chat (DM), bukan grup/channel
+      if (!dialog.isUser) continue;
+      if (!dialog.entity) continue;
+
+      const peer = dialog.entity;
+      const peerId = peer.id?.toString();
+
+      // Skip diri sendiri
+      if (peerId === myId) continue;
+
+      let messages;
+      try {
+        messages = await client.getMessages(peer, { limit: 10 });
+      } catch (err) {
+        continue; // skip jika error pada chat ini
+      }
+
+      for (const message of messages) {
+        if (!message.text) continue;
+        if (message.out) continue; // abaikan pesan keluar (dari kita)
+
+        const msgDate = new Date(message.date * 1000);
+        if (msgDate < cutoffDate) break; // sudah diurutkan terbaru → stop
+
+        const idempotencyKey = `tg_dm_${message.id}`;
+
+        // Cek apakah sudah ada di Supabase
+        const { data: existing } = await supabase
+          .from('intake_message')
+          .select('id')
+          .eq('idempotency_key', idempotencyKey)
+          .maybeSingle();
+
+        if (existing) continue; // sudah diproses sebelumnya
+
+        const senderName = [peer.firstName, peer.lastName].filter(Boolean).join(' ')
+          || peer.username
+          || `User_${peerId}`;
+        const senderPhone = peer.phone ? `+${peer.phone}` : null;
+        const timestamp = msgDate.toISOString();
+
+        console.log(`   📩 [REPLAY] DM terlewat dari: ${senderName} (${timestamp})`);
+        console.log(`      Pesan: ${message.text.substring(0, 80)}${message.text.length > 80 ? '...' : ''}`);
+
+        const raw = await saveRawIntakeMessage({
+          source_channel:  'telegram',
+          source_ref:      peerId,
+          sender:          senderPhone
+                             ? `${senderName} (${senderPhone})`
+                             : `${senderName} (${peerId})`,
+          thread_ref:      null,
+          received_at:     timestamp,
+          body_text:       message.text,
+          attachments:     null,
+          raw_payload: {
+            group_name:      `DM → ${displayName} (${phoneNumber})`,
+            telegram_msg_id: message.id?.toString(),
+            sender_id:       peerId,
+            receiver_phone:  phoneNumber,
+            receiver_name:   displayName,
+            replayed:        true,
+          },
+          idempotency_key: idempotencyKey,
+        });
+
+        if (raw) {
+          await processRawMessage({
+            ...(raw || {}),
+            id:             raw?.id || null,
+            source_channel: 'telegram',
+            source_ref:     peerId,
+            sender:         senderPhone ? `${senderName} (${senderPhone})` : `${senderName} (${peerId})`,
+            body_text:      message.text,
+            raw_payload: {
+              group_name:      `DM → ${displayName} (${phoneNumber})`,
+              telegram_msg_id: message.id?.toString(),
+            },
+            idempotency_key: idempotencyKey,
+          });
+          replayCount++;
+        }
+      }
+    }
+
+    if (replayCount > 0) {
+      console.log(`   ✅ ${replayCount} DM terlewat berhasil diproses!`);
+    } else {
+      console.log(`   ✅ Tidak ada DM terlewat dalam 24 jam terakhir.`);
+    }
+
+  } catch (err) {
+    console.warn(`   ⚠️  Replay DM gagal (tidak kritis): ${err.message}`);
+  }
 }
 
 async function startUserAccount(account) {
@@ -219,6 +330,9 @@ async function startUserAccount(account) {
   console.log(`   ID      : ${me.id}`);
   console.log(`   Nomor   : ${phoneNumber}`);
   console.log(`\n👂 Mendengarkan pesan masuk DM ke akun ini...`);
+
+  // ── REPLAY: Tangkap DM yang masuk saat listener offline ──
+  await replayMissedDMs(client, me, displayName, phoneNumber);
 
   // ── EVENT LISTENER: Tangkap pesan DM baru ──
   client.addEventHandler(

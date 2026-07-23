@@ -24,7 +24,16 @@ export const env = {
   EMAIL_USER: process.env.EMAIL_USER,
   EMAIL_PASS: process.env.EMAIL_PASS,
   EMAIL_SECURE: process.env.EMAIL_SECURE === "true",
-  };
+
+  // Grup khusus
+  TG_BEACON_CHAT_ID: process.env.TG_BEACON_CHAT_ID || "-5546265953",
+  TG_UTT_CHAT_ID: process.env.TG_UTT_CHAT_ID || "-1003753882093",
+
+  // ClickUp integration (opsional)
+  CLICKUP_API_KEY: process.env.CLICKUP_API_KEY || null,
+  CLICKUP_LIST_ID: process.env.CLICKUP_LIST_ID || null,
+};
+
 
 if (!env.TG_TOKEN) {
   throw new Error("TG_TOKEN belum di set di file .env");
