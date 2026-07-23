@@ -54,7 +54,7 @@ async function start() {
     startClickupListener();
 
     console.log("📱 Memulai Telegram Personal Account Listener (MTProto)...");
-    //telegramUserClient = await startTelegramUserListener(); // ← Hanya minta OTP jika session belum ada
+    telegramUserClient = await startTelegramUserListener(); // ← Hanya minta OTP jika session belum ada
 
 
     console.log("\n✅ Semua sistem berhasil dijalankan!");
