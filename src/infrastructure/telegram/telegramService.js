@@ -82,15 +82,41 @@ function initTelegramBot() {
     }
   });
 
-  // Cegah spam log di terminal jika token tidak valid (401)
+   // Cegah spam log di terminal jika token tidak valid (401)
+  // bot.on("polling_error", (err) => {
+  //   if (err.message.includes("401")) {
+  //     console.error("❌ Telegram Bot Polling Error: 401 Unauthorized. Token bot di .env tidak valid atau expired. Polling dinonaktifkan.");
+  //     bot.stopPolling();
+  //   } else {
+  //     console.log("===== TELEGRAM ERROR =====");
+  //   console.log(err);
+  //   console.log("code :", err.code);
+  //   console.log("message :", err.message);
+  //   console.log("response :", err.response?.body);
+  //   console.log("==========================");
+  //   }
+  // });
+
   bot.on("polling_error", (err) => {
-    if (err.message.includes("401")) {
-      console.error("❌ Telegram Bot Polling Error: 401 Unauthorized. Token bot di .env tidak valid atau expired. Polling dinonaktifkan.");
-      bot.stopPolling();
-    } else {
-      console.warn("⚠️ Telegram Bot Polling Error:", err.message);
-    }
-  });
+  if (err.message.includes("401")) {
+    console.error("❌ Telegram Bot: Token tidak valid (401).");
+    bot.stopPolling();
+    return;
+  }
+
+  if (err.response?.statusCode === 409) {
+    console.warn("⚠️ Telegram Bot sudah berjalan di instance lain (409 Conflict).");
+    return;
+  }
+
+  console.error("❌ Telegram Polling Error");
+  console.error("Code    :", err.code || "-");
+  console.error("Message :", err.message);
+
+  if (err.response?.body?.description) {
+    console.error("Detail  :", err.response.body.description);
+  }
+});
 
   console.log(`🤖 Telegram Bot started successfully`);
   console.log(`   Main Chat ID     : ${MAIN_CHAT_ID}`);
@@ -320,14 +346,14 @@ function initTelegramBot() {
   // ─────── MESSAGE HANDLER ───────
   bot.on('message', async (msg) => {
     // Debugging sementara untuk melihat semua pesan masuk
-    console.log('TELEGRAM MESSAGE:', {
-      text: msg.text,
-      chatId: msg.chat.id,
-      chatType: msg.chat.type,
-      username: msg.from.username,
-      from: msg.from.id,
-      is_bot: msg.from.is_bot
-    });
+    // console.log('TELEGRAM MESSAGE:', {
+    //   text: msg.text,
+    //   chatId: msg.chat.id,
+    //   chatType: msg.chat.type,
+    //   username: msg.from.username,
+    //   from: msg.from.id,
+    //   is_bot: msg.from.is_bot
+    // });
 
 
     if (!msg.text || msg.from?.is_bot) return;

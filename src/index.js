@@ -11,7 +11,8 @@ import { startOutlookListener } from "./infrastructure/outlook/outlookService.js
 // import { authorize } from "./config/gmailAuth.js";
 // import { forwardUnreadEmail } from "./usecases/forwardUnreadEmail.js";
 import { startGmailListener } from "./infrastructure/gmail/gmailListener.js";
-
+import { startClickupListener } from "./infrastructure/clickup/clickupListener.js";
+import { startIntakeMessageListener } from "./usecases/intakeMessageListener.js";
 console.log("🚀 Unified Incident Intake System");
 console.log("=====================================");
 
@@ -21,20 +22,40 @@ let stopEmailListener   = null;
 
 async function start() {
   try {
+    // console.log("📧 Testing Gmail...");
+    // const auth = await authorize();
+    // await forwardUnreadEmail(auth);
+    // console.log("✅ Gmail berhasil dicek.");
+
+    // Dinonaktifkan sementara untuk mencegah crash karena file credentials.json tidak ada.
+    if (process.env.ENABLE_GMAIL_LISTENER === "true") {
+      console.log("📧 Memulai Gmail Listener...");
+      await startGmailListener();
+    } else {
+      console.log("⏸️ Gmail Listener dinonaktifkan.");
+    }
+
     console.log("🤖 Memulai Telegram Bot...");
     initTelegramBot();
 
     console.log("⏰ Memulai SLA Worker...");
     startSlaWorker();
 
-    // console.log("📧 Memulai Outlook IMAP Listener...");
-    // startOutlookListener();
+    console.log("📧 Memulai Outlook IMAP Listener...");
+    startOutlookListener();
+
+    console.log("📡 Memulai Intake Listener...");
+    startIntakeMessageListener();
 
     console.log("📱 Memulai WhatsApp Connection...");
     whatsappSock = await connectWhatsApp();
+    
+    console.log("🔗 Memulai ClickUp Listener...");
+    startClickupListener();
 
     console.log("📱 Memulai Telegram Personal Account Listener (MTProto)...");
-    telegramUserClient = await startTelegramUserListener(); // ← Hanya minta OTP jika session belum ada
+    //telegramUserClient = await startTelegramUserListener(); // ← Hanya minta OTP jika session belum ada
+
 
     console.log("\n✅ Semua sistem berhasil dijalankan!");
     console.log("   • Telegram Bot (dengan Menu & AI)");
