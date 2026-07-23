@@ -2010,7 +2010,7 @@ function createFormalTicket(email, analysis = {}) {
 async function sendIncidentAlert(email, analysis = {}, customMessage = null) {
   const botInstance = initTelegramBot();
   // Mengirim kandidat tiket baru ke grup pre-konfirmasi & edit (TG_UTT_CHAT_ID = BTO -5546265953)
-  const BEACON_ID = (env.TG_UTT_CHAT_ID || env.TG_CHAT_ID).trim();
+  const BEACON_ID = (env.TG_BEACON_CHAT_ID || env.TG_CHAT_ID).trim();
 
   const activeAnalysis = analysis && Object.keys(analysis).length > 0 ? analysis : (email.analysis || {});
 

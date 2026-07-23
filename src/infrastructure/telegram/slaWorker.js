@@ -93,7 +93,7 @@ async function notifyHeadServiceLead(ticketId, severity, subject) {
 // LOOPING 1: SLA KONFIRMASI — cek tiket Pending Confirmation (15 Menit)
 // ══════════════════════════════════════════════════════════════════
 async function checkSlaConfirmation() {
-  const BEACON_ID = (env.TG_BEACON_CHAT_ID || env.TG_CHAT_ID).trim();
+  const SLA_CHAT_ID = (env.TG_UTT_CHAT_ID || env.TG_CHAT_ID).trim();
   const tickets = await getTicketsNeedingConfirmationCheck();
 
   for (const t of tickets) {
@@ -118,7 +118,7 @@ async function checkSlaConfirmation() {
         `<i>Cari tiket di grup dan tekan tombol [✅ Ini Tiket] atau [❌ Bukan Tiket].</i>`;
 
       try {
-        await getBot().sendMessage(BEACON_ID, alertText, { parse_mode: 'HTML' });
+        await getBot().sendMessage(SLA_CHAT_ID, alertText, { parse_mode: 'HTML' });
         await markSlaConfirmFlag(t.ticket_id, 'alert');
         console.log(`[SLA-Konfirmasi] ALERT terkirim untuk tiket ${t.ticket_id} (${Math.round(elapsedMin)} menit belum dikonfirmasi)`);
       } catch (err) {
@@ -142,7 +142,7 @@ async function checkSlaConfirmation() {
         `Tiket ini belum dikonfirmasi. Mohon segera tentukan apakah ini tiket.`;
 
       try {
-        await getBot().sendMessage(BEACON_ID, warnText, { parse_mode: 'HTML' });
+        await getBot().sendMessage(SLA_CHAT_ID, warnText, { parse_mode: 'HTML' });
         await markSlaConfirmFlag(t.ticket_id, 'warn');
         console.log(`[SLA-Konfirmasi] WARN terkirim untuk tiket ${t.ticket_id} (sisa ${sisaMin} menit)`);
       } catch (err) {
@@ -156,7 +156,7 @@ async function checkSlaConfirmation() {
 // LOOPING 2: SLA PEKERJAAN — cek tiket In Progress (2 Jam / per severity)
 // ══════════════════════════════════════════════════════════════════
 async function checkSla() {
-  const BEACON_ID = (env.TG_BEACON_CHAT_ID || env.TG_CHAT_ID).trim();
+  const SLA_CHAT_ID = (env.TG_UTT_CHAT_ID || env.TG_CHAT_ID).trim();
   const tickets = await getTicketsNeedingSlaCheck();
 
   for (const t of tickets) {
@@ -183,7 +183,7 @@ async function checkSla() {
         `Sistem melakukan <b>eskalasi otomatis</b> ke Head / Service Lead.`;
 
       try {
-        await getBot().sendMessage(BEACON_ID, alertText, { parse_mode: 'HTML' });
+        await getBot().sendMessage(SLA_CHAT_ID, alertText, { parse_mode: 'HTML' });
         await markSlaFlag(t.ticket_id, 'alert');
 
         // Eskalasi otomatis: update status ke Escalated di DB
@@ -216,7 +216,7 @@ async function checkSla() {
         `Tiket ini belum dikerjakan. Mohon segera ditangani sebelum SLA habis.`;
 
       try {
-        await getBot().sendMessage(BEACON_ID, warnText, { parse_mode: 'HTML' });
+        await getBot().sendMessage(SLA_CHAT_ID, warnText, { parse_mode: 'HTML' });
         await markSlaFlag(t.ticket_id, 'warn');
         console.log(`[SLA] WARN terkirim untuk tiket ${t.ticket_id} (sisa ${sisaMenit} menit)`);
       } catch (err) {
