@@ -787,7 +787,8 @@ export function isSmallTalk(text) {
     return false;
   }
 
-  // 2. Daftar pola sapaan atau jawaban pendek polos yang tidak mengandung keluhan
+  // 2. Daftar pola sapaan atau jawaban pendek polos yang tidak mengandung keluhan 
+  // update terakhir 23 juli 
   const IRRELEVANT_PATTERNS = [
     /^(hai+|halo+|hi+|hello+|pagi|siang|sore|malam)$/i,
     /^(terima kasih|thanks|thank you|makasih|tq|thx)$/i,
