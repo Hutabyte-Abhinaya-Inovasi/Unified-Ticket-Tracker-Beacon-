@@ -38,8 +38,10 @@ DATA:
 ${trimmedData}
 
 Tugas Anda:
-1. Periksa apakah ada data yang saling bertentangan/tidak konsisten (contoh: status "Done" tapi action_needed masih menyebutkan tindakan mendesak; priority "emergency" tapi terkesan sudah lama tidak disentuh tanpa alasan jelas).
-2. Berikan confidence_score (0-100) seberapa layak data ini langsung dipakai untuk menjawab pengguna.
+1. Periksa konsistensi lifecycle: confirmed wajib punya confirmed_at, pending_confirmation wajib belum confirmed/rejected, rejected wajib punya rejected_at.
+2. Periksa severity/priority, SLA konfirmasi, SLA pekerjaan, escalated_at, status, dan action_needed.
+3. Tandai confirmed_at dan rejected_at yang sama-sama terisi sebagai inkonsistensi serius.
+4. Berikan confidence_score (0-100) seberapa layak data ini langsung dipakai untuk menjawab pengguna.
 
 Balas HANYA JSON valid, tanpa penjelasan tambahan:
 {

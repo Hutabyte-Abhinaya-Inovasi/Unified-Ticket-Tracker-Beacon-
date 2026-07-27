@@ -1,7 +1,8 @@
 // src/infrastructure/ai/pipeline/agentDataValidation.js
+
 /**
- * AGENT 1 — DATA VALIDATION
- * - Memastikan data yang diambil dari Supabase sesuai bentuk yang diharapkan per tool.
+ * AGENT 1 - DATA VALIDATION
+ * Memastikan data tiket dan lifecycle kandidat mempunyai bentuk yang sesuai.
  */
 
 const EXPECTED_TICKET_FIELDS = [
@@ -16,11 +17,68 @@ const EXPECTED_TICKET_FIELDS = [
   "action_needed",
   "source",
   "priority",
+  "severity",
+  "confirmed_at",
+  "confirmed_by",
+  "rejected_at",
+  "rejected_by",
+  "sla_warned",
+  "sla_alerted",
+  "sla_deadline_minutes",
+  "escalated_at",
+  "sla_confirm_warned",
+  "sla_confirm_alerted",
+  "intake_received_at",
+  "ticket_state",
+  "effective_severity",
+  "confirmation_sla_state",
+  "work_sla_state",
+  "is_escalated",
+  "needs_confirmation",
 ];
+
+const VALID_TICKET_STATES = new Set([
+  "confirmed",
+  "pending_confirmation",
+  "rejected",
+  "inconsistent",
+]);
 
 function findMissingFields(row) {
   if (!row || typeof row !== "object") return EXPECTED_TICKET_FIELDS;
-  return EXPECTED_TICKET_FIELDS.filter((f) => row[f] === undefined);
+  return EXPECTED_TICKET_FIELDS.filter((field) => row[field] === undefined);
+}
+
+function validateLifecycle(row, issues, prefix = "") {
+  if (!VALID_TICKET_STATES.has(row.ticket_state)) {
+    issues.push(`${prefix}ticket_state tidak valid: ${row.ticket_state}`);
+  }
+
+  if (row.ticket_state === "confirmed") {
+    if (!row.confirmed_at) {
+      issues.push(`${prefix}ticket_state confirmed tetapi confirmed_at kosong`);
+    }
+    if (row.rejected_at) {
+      issues.push(`${prefix}ticket_state confirmed tetapi rejected_at terisi`);
+    }
+  }
+
+  if (
+    row.ticket_state === "pending_confirmation" &&
+    (row.confirmed_at || row.rejected_at)
+  ) {
+    issues.push(
+      `${prefix}pending_confirmation tetapi confirmed_at atau rejected_at sudah terisi`
+    );
+  }
+
+  if (row.ticket_state === "rejected" && !row.rejected_at) {
+    issues.push(`${prefix}ticket_state rejected tetapi rejected_at kosong`);
+  }
+
+  if (row.confirmed_at && row.rejected_at) {
+    issues.push(`${prefix}confirmed_at dan rejected_at sama-sama terisi`);
+  }
 }
 
 export function runDataValidation(toolName, args, rawResult) {
@@ -48,10 +106,13 @@ export function runDataValidation(toolName, args, rawResult) {
       if (!isError) {
         if (!rawResult.ticket_id) {
           isEmpty = true;
-          issues.push("Tiket tidak ditemukan (ticket_id kosong pada hasil)");
+          issues.push("Tiket tidak ditemukan");
         } else {
           const missing = findMissingFields(rawResult);
-          if (missing.length > 0) issues.push(`Field tidak lengkap pada tiket: ${missing.join(", ")}`);
+          if (missing.length > 0) {
+            issues.push(`Field tidak lengkap: ${missing.join(", ")}`);
+          }
+          validateLifecycle(rawResult, issues);
         }
       }
       break;
@@ -60,32 +121,42 @@ export function runDataValidation(toolName, args, rawResult) {
     case "query_tickets": {
       if (!isError) {
         if (!Array.isArray(rawResult.tickets)) {
-          issues.push("Field 'tickets' pada hasil tidak berupa array");
+          issues.push("Field tickets bukan array");
         } else if (rawResult.tickets.length === 0) {
           isEmpty = true;
         } else {
           const missingSet = new Set();
-          rawResult.tickets.forEach((row) => {
-            findMissingFields(row).forEach((f) => missingSet.add(f));
+
+          rawResult.tickets.forEach((row, index) => {
+            findMissingFields(row).forEach((field) => missingSet.add(field));
+            validateLifecycle(row, issues, `Baris ${index + 1}: `);
           });
+
           if (missingSet.size > 0) {
-            issues.push(`Sebagian baris punya field tidak lengkap: ${[...missingSet].join(", ")}`);
+            issues.push(
+              `Sebagian baris mempunyai field tidak lengkap: ${[
+                ...missingSet,
+              ].join(", ")}`
+            );
           }
         }
+
         if (typeof rawResult.count !== "number") {
-          issues.push("Field 'count' (jumlah pasti) tidak tersedia pada hasil");
+          issues.push("Field count tidak tersedia");
+        }
+
+        if (
+          !rawResult.filters_applied ||
+          typeof rawResult.filters_applied !== "object"
+        ) {
+          issues.push("filters_applied tidak tersedia");
         }
       }
       break;
     }
 
-    // update_ticket & delete_ticket sengaja tidak ada case-nya di sini —
-    // tool tersebut sudah dihapus total dari daftar tools AI (lihat openaiService.js).
-    // get_ticket_detail & query_tickets.
-
-    default: {
-      issues.push(`Tool tidak dikenal oleh Data Validation Agent: ${toolName}`);
-    }
+    default:
+      issues.push(`Tool tidak dikenal: ${toolName}`);
   }
 
   return {

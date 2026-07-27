@@ -32,6 +32,14 @@ export const env = {
   // ClickUp integration (opsional)
   CLICKUP_API_KEY: process.env.CLICKUP_API_KEY || null,
   CLICKUP_LIST_ID: process.env.CLICKUP_LIST_ID || null,
+  // outline knowlage base 
+  OUTLINE_BASE_URL: process.env.OUTLINE_BASE_URL,
+  OUTLINE_API_KEY: process.env.OUTLINE_API_KEY,
+  OUTLINE_COLLECTION_ID: process.env.OUTLINE_COLLECTION_ID,
+  OUTLINE_REQUEST_TIMEOUT_MS:
+    process.env.OUTLINE_REQUEST_TIMEOUT_MS || "15000",
+  OUTLINE_MAX_RETRY:
+    process.env.OUTLINE_MAX_RETRY || "3",
 };
 
 
