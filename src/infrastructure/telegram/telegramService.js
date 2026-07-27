@@ -5,6 +5,8 @@ import { env } from '../../config/env.js';
 import {
   saveEmailLog,
   saveRawIntakeMessage,
+  getRawIntakeMessageById,
+  markRawMessageAs,
   updateIncidentStatus,
   getTicketsByStatus,
   getTicketsByDateRange,
@@ -402,21 +404,18 @@ function initTelegramBot() {
         return null;
       });
 
-      // Proses melalui pipeline utama
-      await processRawMessage({
-        ...(raw || {}),
-        id: raw?.id || null,
-        source_channel: 'telegram',
-        source_ref: chatId.toString(),
-        sender: `${sender} (${userId})`,
-        body_text: msg.text,
-        raw_payload: {
-          group_name: groupName,
-          telegram_msg_id: msg.message_id,
-        },
-        idempotency_key: `tg_grp_${msg.message_id}`,
-      });
-      return;
+      // Tunggu konfirmasi operator melalui tombol Telegram
+if (raw) {
+  console.log(
+    `📥 Intake ${raw.id} tersimpan dan menunggu tombol Proses Tiket.`
+  );
+} else {
+  console.warn(
+    "⚠️ Pesan Telegram tidak berhasil disimpan ke intake_message."
+  );
+}
+
+return;
     }
 
     // ── PRIORITAS 3: Main group → balas dengan AI ──
@@ -557,6 +556,32 @@ function initTelegramBot() {
       // -- Repair followup options (prefix: rq_) --
       if (data.startsWith('rq_')) {
         await handleRepairFollowUpCallback(query, chatId, userId, data);
+        return;
+      }
+
+            // -- Kandidat mentah: proses intake menjadi tiket bersih --
+      if (data.startsWith('process_intake_')) {
+        const intakeId = data.replace('process_intake_', '');
+
+        await handleProcessIntake(
+          query,
+          chatId,
+          intakeId
+        );
+
+        return;
+      }
+
+      // -- Kandidat mentah: tandai bukan tiket --
+      if (data.startsWith('reject_intake_')) {
+        const intakeId = data.replace('reject_intake_', '');
+
+        await handleRejectIntake(
+          query,
+          chatId,
+          intakeId
+        );
+
         return;
       }
 
@@ -1028,7 +1053,161 @@ async function handleDraftPublish(query, chatId, ticketId) {
     await bot.sendMessage(chatId, `Gagal mempublish tiket. Error: ${err.message}`);
   }
 }
+// ================== HANDLER: PROCESS RAW INTAKE ==================
+async function handleProcessIntake(query, chatId, intakeId) {
+  try {
+    await bot.answerCallbackQuery(query.id, {
+      text: `⏳ Intake ${intakeId} sedang diproses...`,
+      show_alert: false,
+    });
 
+    const raw = await getRawIntakeMessageById(intakeId);
+
+    if (!raw) {
+      await bot.answerCallbackQuery(query.id, {
+        text: `Intake ${intakeId} tidak ditemukan.`,
+        show_alert: true,
+      }).catch(() => {});
+
+      return;
+    }
+
+    if (raw.status !== "pending") {
+      await bot.answerCallbackQuery(query.id, {
+        text: `Intake ini sudah diproses. Status: ${raw.status}`,
+        show_alert: true,
+      }).catch(() => {});
+
+      return;
+    }
+
+    await bot.editMessageText(
+      `⏳ <b>INTAKE SEDANG DIPROSES</b>\n\n` +
+      `🆔 Intake ID: <code>${escapeHTML(String(intakeId))}</code>\n` +
+      `🤖 AI sedang membersihkan data dan membuat kandidat tiket...`,
+      {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [] },
+      }
+    ).catch(() => {});
+
+    const result = await processRawMessage(raw);
+
+    if (result?.action === "created") {
+      await bot.editMessageText(
+        `✅ <b>INTAKE BERHASIL DIPROSES</b>\n\n` +
+        `🆔 Intake ID: <code>${escapeHTML(String(intakeId))}</code>\n` +
+        `🎫 Ticket ID: <code>${escapeHTML(result.ticketId)}</code>\n\n` +
+        `Kandidat tiket yang sudah dibersihkan telah dikirim ke Ticket Operations.`,
+        {
+          chat_id: chatId,
+          message_id: query.message.message_id,
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: [] },
+        }
+      ).catch(() => {});
+
+      return;
+    }
+
+    if (result?.action === "threaded") {
+      await bot.editMessageText(
+        `🔗 <b>INTAKE MENJADI LANJUTAN TIKET</b>\n\n` +
+        `🆔 Intake ID: <code>${escapeHTML(String(intakeId))}</code>\n` +
+        `🎫 Ticket ID: <code>${escapeHTML(result.ticketId)}</code>`,
+        {
+          chat_id: chatId,
+          message_id: query.message.message_id,
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: [] },
+        }
+      ).catch(() => {});
+
+      return;
+    }
+
+    await bot.editMessageText(
+      `ℹ️ Intake <code>${escapeHTML(String(intakeId))}</code> selesai diperiksa.`,
+      {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [] },
+      }
+    ).catch(() => {});
+  } catch (err) {
+    console.error("handleProcessIntake error:", err.message);
+
+    await bot.sendMessage(
+      chatId,
+      `❌ Gagal memproses Intake ID <code>${escapeHTML(String(intakeId))}</code>.\n` +
+      `Error: ${escapeHTML(err.message)}`,
+      { parse_mode: "HTML" }
+    ).catch(() => {});
+  }
+}
+
+
+// ================== HANDLER: REJECT RAW INTAKE ==================
+async function handleRejectIntake(query, chatId, intakeId) {
+  try {
+    const raw = await getRawIntakeMessageById(intakeId);
+
+    if (!raw) {
+      await bot.answerCallbackQuery(query.id, {
+        text: `Intake ${intakeId} tidak ditemukan.`,
+        show_alert: true,
+      });
+
+      return;
+    }
+
+    if (raw.status !== "pending") {
+      await bot.answerCallbackQuery(query.id, {
+        text: `Intake ini sudah diproses. Status: ${raw.status}`,
+        show_alert: true,
+      });
+
+      return;
+    }
+
+    await markRawMessageAs(
+      intakeId,
+      "ignored",
+      null,
+      "not_relevant"
+    );
+
+    await bot.editMessageText(
+      `❌ <b>BUKAN TIKET</b>\n\n` +
+      `🆔 Intake ID: <code>${escapeHTML(String(intakeId))}</code>\n` +
+      `Pesan ditolak oleh ${escapeHTML(
+        query.from?.first_name || query.from?.username || "Operator"
+      )}.\n\n` +
+      `<i>Data tetap tersimpan di intake_message dan tidak dibuat menjadi tiket.</i>`,
+      {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [] },
+      }
+    );
+
+    await bot.answerCallbackQuery(query.id, {
+      text: `Intake ${intakeId} ditandai bukan tiket.`,
+      show_alert: false,
+    });
+  } catch (err) {
+    console.error("handleRejectIntake error:", err.message);
+
+    await bot.answerCallbackQuery(query.id, {
+      text: "Gagal menolak intake. Silakan coba lagi.",
+      show_alert: true,
+    }).catch(() => {});
+  }
+}
 // -- Konfirmasi tiket: L1 klik "✅ Ini Tiket" di Beacon --
 async function handleTicketConfirm(query, chatId, ticketId) {
   try {
@@ -2005,7 +2184,127 @@ function createFormalTicket(email, analysis = {}) {
     ((email.body || '').length > 600 ? '\n<i>...pesan terpotong</i>' : '')
   );
 }
+// ================== SEND RAW INTAKE CANDIDATE ==================
+export async function sendRawIntakeCandidate(raw) {
+  const botInstance = initTelegramBot();
 
+  // Kandidat pesan mentah dikirim ke Beacon Ticket Operations
+  const ticketOperationsChatId = (
+    env.TG_BEACON_CHAT_ID || env.TG_CHAT_ID
+  ).trim();
+
+  let original = raw.raw_payload || {};
+
+  // Antisipasi raw_payload tersimpan sebagai JSON string
+  if (typeof original === "string") {
+    try {
+      original = JSON.parse(original);
+    } catch {
+      original = {};
+    }
+  }
+
+  const intakeId = raw.id;
+
+  const sourceChannel =
+    raw.source_channel ||
+    raw.source ||
+    "unknown";
+
+  const sourceLabels = {
+    whatsapp: "WhatsApp",
+    wa_group: "WhatsApp Group",
+    telegram: "Telegram",
+    telegram_dm: "Telegram Direct Message",
+    telegram_group: "Telegram Group",
+    outlook: "Microsoft 365 Outlook",
+    email: "Email",
+  };
+
+  const sourceLabel =
+    sourceLabels[sourceChannel] ||
+    sourceChannel;
+
+  const sender =
+    original.push_name ||
+    original.sender_name ||
+    original.from ||
+    raw.sender ||
+    "-";
+
+  const sourceName =
+    original.group_name ||
+    original.subject ||
+    raw.group_name ||
+    (sourceChannel.includes("telegram")
+      ? "Direct Message"
+      : "(No Subject)");
+
+  const body =
+    original.body ||
+    original.text ||
+    raw.body_text ||
+    raw.body ||
+    "-";
+
+  const receivedTime = raw.received_at
+    ? new Date(raw.received_at).toLocaleString("id-ID", {
+        timeZone: "Asia/Jakarta",
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      })
+    : "-";
+
+  const messageText =
+    `🆕 <b>KANDIDAT PESAN MASUK</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n` +
+    `🆔 Intake ID : <code>${escapeHTML(String(intakeId))}</code>\n` +
+    `📱 Sumber    : ${escapeHTML(sourceLabel)}\n` +
+    `👥 Grup/Subjek: ${escapeHTML(sourceName)}\n` +
+    `👤 Pengirim  : ${escapeHTML(sender)}\n` +
+    `⏰ Waktu     : ${escapeHTML(receivedTime)}\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n` +
+    `📝 <b>Isi Pesan</b>\n` +
+    `${escapeHTML(String(body).substring(0, 1500))}\n\n` +
+    `<i>Pesan belum masuk ke Unified Ticket Tracker. ` +
+    `Pilih Proses Tiket untuk menjalankan AI dan membuat kandidat tiket bersih.</i>`;
+
+  const keyboard = {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          {
+            text: "🤖 Proses Tiket",
+            callback_data: `process_intake_${intakeId}`,
+          },
+          {
+            text: "❌ Bukan Tiket",
+            callback_data: `reject_intake_${intakeId}`,
+          },
+        ],
+      ],
+    },
+  };
+
+  const sent = await botInstance.sendMessage(
+    ticketOperationsChatId,
+    messageText,
+    {
+      parse_mode: "HTML",
+      ...keyboard,
+    }
+  );
+
+  console.log(
+    `[Raw Intake] Intake ${intakeId} dikirim ke Ticket Operations, message ID ${sent.message_id}`
+  );
+
+  return sent;
+}
 // ================== SEND INCIDENT ALERT ==================
 async function sendIncidentAlert(email, analysis = {}, customMessage = null) {
   const botInstance = initTelegramBot();

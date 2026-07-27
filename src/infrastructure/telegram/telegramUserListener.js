@@ -199,21 +199,12 @@ async function replayMissedDMs(client, me, displayName, phoneNumber) {
         });
 
         if (raw) {
-          await processRawMessage({
-            ...(raw || {}),
-            id:             raw?.id || null,
-            source_channel: 'telegram',
-            source_ref:     peerId,
-            sender:         senderPhone ? `${senderName} (${senderPhone})` : `${senderName} (${peerId})`,
-            body_text:      message.text,
-            raw_payload: {
-              group_name:      `DM → ${displayName} (${phoneNumber})`,
-              telegram_msg_id: message.id?.toString(),
-            },
-            idempotency_key: idempotencyKey,
-          });
-          replayCount++;
-        }
+  console.log(
+    `   📥 Intake ${raw.id} tersimpan dan menunggu tombol Proses Tiket.`
+  );
+
+  replayCount++;
+}
       }
     }
 
@@ -399,25 +390,12 @@ async function startUserAccount(account) {
           console.log(`   💾 Raw data tersimpan (id: ${raw.id})`);
         }
 
-        // ── STEP 2: Proses via pipeline terpadu ──
-        // processRawMessage menangani: small talk → relevance → threading → tiket baru
-        console.log(`   🤖 Memproses dengan pipeline standar...`);
-        await processRawMessage({
-          ...(raw || {}),
-          // Pastikan field wajib tersedia meski raw save gagal
-          id:              raw?.id || null,
-          source_channel:  'telegram',
-          source_ref:      senderId,
-          sender:          senderPhone ? `${senderName} (${senderPhone})` : `${senderName} (${senderId})`,
-          body_text:       messageText,
-          raw_payload:     {
-            group_name:    `DM → ${displayName} (${phoneNumber})`,
-            telegram_msg_id: messageId,
-          },
-          idempotency_key: `tg_dm_${messageId}`,
-        });
-
-        console.log(`   ✅ Pemrosesan selesai`);
+        // ── STEP 2: Tunggu konfirmasi operator ──
+if (raw) {
+  console.log(
+    `   📥 Intake ${raw.id} tersimpan dan menunggu tombol Proses Tiket.`
+  );
+}
 
 
       } catch (err) {

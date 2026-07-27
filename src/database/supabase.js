@@ -768,6 +768,38 @@ export async function saveRawIntakeMessage(data) {
   }
 }
 
+// ====================== GET RAW INTAKE MESSAGE BY ID ======================
+/**
+ * Mengambil satu pesan mentah dari tabel intake_message berdasarkan Intake ID.
+ *
+ * @param {string|number} rawId
+ * @returns {Object|null}
+ */
+export async function getRawIntakeMessageById(rawId) {
+  try {
+    const { data, error } = await supabase
+      .from("intake_message")
+      .select("*")
+      .eq("id", rawId)
+      .single();
+
+    if (error) {
+      console.error(
+        `❌ Gagal mengambil intake_message dengan ID ${rawId}:`,
+        error.message
+      );
+      return null;
+    }
+
+    return data;
+  } catch (err) {
+    console.error(
+      `❌ Unexpected error saat mengambil intake_message ID ${rawId}:`,
+      err.message
+    );
+    return null;
+  }
+}
 
 // ====================== MARK RAW MESSAGE ======================
 /**

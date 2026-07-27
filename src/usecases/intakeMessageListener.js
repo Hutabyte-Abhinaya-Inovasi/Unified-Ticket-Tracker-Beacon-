@@ -1,6 +1,6 @@
 import { supabase } from "../database/supabase.js";
 //import { sendCandidateTicket } from "../infrastructure/telegram/telegramService.js";
-import { sendIncidentAlert } from "../infrastructure/telegram/telegramService.js";
+import { sendRawIntakeCandidate } from "../infrastructure/telegram/telegramService.js";
 
 export function startIntakeMessageListener() {
 
@@ -41,7 +41,7 @@ export function startIntakeMessageListener() {
 
         console.log("📨 Telegram Data:", telegramData);
 
-        await sendIncidentAlert(telegramData);
+        await sendRawIntakeCandidate(raw);
 
     } catch (err) {
         console.error(err);
