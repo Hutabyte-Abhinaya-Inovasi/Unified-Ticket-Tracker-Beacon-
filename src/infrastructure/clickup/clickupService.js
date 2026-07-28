@@ -13,6 +13,12 @@ export async function createClickUpTask(ticket) {
     console.log("📤 Mengirim ke ClickUp...");
     console.log(ticket);
 
+    // Ambil severity dan category dari Unified_Ticket_Tracker
+    const tags = [
+      ticket.priority,
+      ticket.category,
+    ].filter(Boolean);
+
     const response = await fetch(
       `https://api.clickup.com/api/v2/list/${env.CLICKUP_LIST_ID}/task`,
       {
@@ -23,6 +29,7 @@ export async function createClickUpTask(ticket) {
         },
         body: JSON.stringify({
           name: `${ticket.ticket_id} - ${ticket.subject || ticket.summary || "No Subject"}`,
+
           description: `
 Ticket ID : ${ticket.ticket_id}
 
@@ -30,12 +37,17 @@ From : ${ticket.from}
 
 Source : ${ticket.source}
 
-Priority : ${ticket.priority}
+Severity : ${ticket.priority || "-"}
+
+Category : ${ticket.category || "-"}
 
 Body :
 
 ${ticket.body}
 `,
+
+          // Tag ClickUp
+          tags: tags,
         }),
       }
     );
@@ -62,3 +74,4 @@ ${ticket.body}
 
 // Backward compatibility
 export const pushTicketToClickUp = createClickUpTask;
+

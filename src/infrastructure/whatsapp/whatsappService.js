@@ -166,10 +166,30 @@ export async function connectWhatsApp() {
       if (!msg?.message || msg.key.fromMe) return;
 
       const remoteJid = msg.key.remoteJid || "";
+
+      // Abaikan WhatsApp Status / broadcast
+      if (
+        remoteJid === "status@broadcast" ||
+        remoteJid.endsWith("@broadcast")
+      ) {
+        return;
+      }
+
       const isGrp = isGroup(remoteJid);
 
-      // Grup harus terdaftar di ALLOWED_GROUPS; pesan DM (japri) selalu lolos
-      if (isGrp && !ALLOWED_GROUPS.has(remoteJid)) return;
+      // Grup hanya diproses jika terdaftar di ALLOWED_GROUPS
+      if (isGrp && !ALLOWED_GROUPS.has(remoteJid)) {
+        return;
+      }
+
+      // Selain group, hanya izinkan DM WhatsApp
+      const isDm =
+        remoteJid.endsWith("@s.whatsapp.net") ||
+        remoteJid.endsWith("@lid");
+
+      if (!isGrp && !isDm) {
+        return;
+      }
 
       const senderName = msg.pushName || "Unknown User";
       const text = extractMessageText(msg);

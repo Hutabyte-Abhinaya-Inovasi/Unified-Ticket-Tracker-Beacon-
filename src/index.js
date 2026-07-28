@@ -10,7 +10,7 @@ import { startSlaWorker } from "./infrastructure/telegram/slaWorker.js";
 import { startOutlookListener } from "./infrastructure/outlook/outlookService.js";
 // import { authorize } from "./config/gmailAuth.js";
 // import { forwardUnreadEmail } from "./usecases/forwardUnreadEmail.js";
-import { startGmailListener } from "./infrastructure/gmail/gmailListener.js";
+//import { startGmailListener } from "./infrastructure/gmail/gmailListener.js";
 import { startClickupListener } from "./infrastructure/clickup/clickupListener.js";
 import { startIntakeMessageListener } from "./usecases/intakeMessageListener.js";
 console.log("🚀 Unified Incident Intake System");
@@ -28,12 +28,12 @@ async function start() {
     // console.log("✅ Gmail berhasil dicek.");
 
     // Dinonaktifkan sementara untuk mencegah crash karena file credentials.json tidak ada.
-    if (process.env.ENABLE_GMAIL_LISTENER === "true") {
-      console.log("📧 Memulai Gmail Listener...");
-      await startGmailListener();
-    } else {
-      console.log("⏸️ Gmail Listener dinonaktifkan.");
-    }
+    // if (process.env.ENABLE_GMAIL_LISTENER === "true") {
+    //   console.log("📧 Memulai Gmail Listener...");
+    //   await startGmailListener();
+    // } else {
+    //   console.log("⏸️ Gmail Listener dinonaktifkan.");
+    // }
 
     console.log("🤖 Memulai Telegram Bot...");
     initTelegramBot();

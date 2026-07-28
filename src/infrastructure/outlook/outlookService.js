@@ -78,6 +78,7 @@ async function getAccessToken() {
   return result.accessToken;
 }
 
+
 async function graphRequest(token, url, options = {}) {
   const response = await fetch(url, {
     ...options,
