@@ -128,27 +128,67 @@ function initTelegramBot() {
   bot.onText(/\/menu|\/start/i, async (msg) => await sendMainMenu(msg));
   bot.onText(/\/getgroupid/i, async (msg) => await sendGroupInfo(msg));
 
-  // Command: /ai [pertanyaan] → interaksi dengan AI (RAG + Tools)
+  // Command: /ai [pertanyaan] → interaksi dengan AI (RAG + Tools) kek mana buat cantik 
   bot.onText(/\/ai(?: (.+))?/s, async (msg, match) => {
-    const chatId = msg.chat.id;
-    const userInput = match[1];
+  const chatId = msg.chat.id;
+  const userInput = match?.[1]?.trim();
 
-    if (!userInput) {
-      await bot.sendMessage(chatId, "Silakan berikan pertanyaan setelah command /ai.\n\nContoh:\n`/ai tampilkan detail tiket INC-20260709-0012`", { parse_mode: 'Markdown' });
-      return;
+  if (!userInput) {
+    await bot.sendMessage(
+      chatId,
+      "Silakan berikan pertanyaan setelah command /ai.\n\n" +
+        "Contoh:\n" +
+        "/ai tampilkan detail tiket INC-20260709-0012"
+    );
+
+    return;
+  }
+
+  const thinkingMsg = await bot.sendMessage(
+    chatId,
+    "🤖 AI sedang berpikir...",
+    {
+      reply_to_message_id: msg.message_id,
     }
+  );
 
-    // Tampilkan pesan "sedang berpikir"
-    const thinkingMsg = await bot.sendMessage(chatId, "🤖 AI sedang berpikir...", { reply_to_message_id: msg.message_id });
+  try {
+    const aiReply = await chatWithAI(userInput);
 
-    try {
-      const aiReply = await chatWithAI(userInput);
-      await bot.editMessageText(aiReply, { chat_id: chatId, message_id: thinkingMsg.message_id, parse_mode: "Markdown" });
-    } catch (err) {
-      console.error("❌ Gagal memproses command /ai:", err.message);
-      await bot.editMessageText("Maaf, terjadi kesalahan saat memproses permintaan Anda.", { chat_id: chatId, message_id: thinkingMsg.message_id });
-    }
-  });
+    const safeReply =
+      String(aiReply || "").trim() ||
+      "Maaf, AI tidak menghasilkan jawaban.";
+
+    await bot.editMessageText(safeReply, {
+      chat_id: chatId,
+      message_id: thinkingMsg.message_id,
+
+      // Jangan menggunakan parse_mode untuk output AI.
+    });
+  } catch (err) {
+    console.error(
+      "❌ Gagal memproses command /ai:",
+      {
+        name: err?.name,
+        message: err?.message,
+        description:
+          err?.response?.body?.description ||
+          null,
+      }
+    );
+
+    await bot.editMessageText(
+      "Maaf, terjadi kesalahan saat memproses permintaan Anda.",
+      {
+        chat_id: chatId,
+        message_id: thinkingMsg.message_id,
+      }
+    ).catch(() => {});
+  }
+});
+// Untuk ai di atas ya gans 
+
+
   // Command: /tiket atau /tiket baru → mulai manual input
   bot.onText(/\/tiket(\s+baru)?/i, async (msg) => {
     const chatId = msg.chat.id.toString();

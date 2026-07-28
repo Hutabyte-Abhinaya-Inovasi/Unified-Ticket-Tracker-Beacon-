@@ -1,73 +1,43 @@
 // src/infrastructure/outline/outlineClient.js
-
 import { env } from "../../config/env.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RETRIES = 2;
+const DEFAULT_LIST_LIMIT = 100;
 
 function readConfigValue(name, fallback = undefined) {
-  const value =
-    env?.[name] ??
-    process.env[name] ??
-    fallback;
-
-  return typeof value === "string"
-    ? value.trim()
-    : value;
+  const value = env?.[name] ?? process.env[name] ?? fallback;
+  return typeof value === "string" ? value.trim() : value;
 }
 
 function getOutlineConfig() {
-  const baseUrl = String(
-    readConfigValue("OUTLINE_BASE_URL", "")
-  )
+  const baseUrl = String(readConfigValue("OUTLINE_BASE_URL", ""))
     .replace(/\/+$/, "")
     .replace(/\/api$/, "");
 
-  const apiKey = String(
-    readConfigValue("OUTLINE_API_KEY", "")
-  );
-
-  const collectionId = String(
-    readConfigValue("OUTLINE_COLLECTION_ID", "")
-  );
-
+  const apiKey = String(readConfigValue("OUTLINE_API_KEY", ""));
+  const collectionId = String(readConfigValue("OUTLINE_COLLECTION_ID", ""));
   const collectionName = String(
-    readConfigValue(
-      "OUTLINE_COLLECTION_NAME",
-      "PT Tricada Intronik"
-    )
+    readConfigValue("OUTLINE_COLLECTION_NAME", "PT Tricada Intronik")
   );
-
   const timeoutMs = Number(
-    readConfigValue(
-      "OUTLINE_API_TIMEOUT_MS",
-      DEFAULT_TIMEOUT_MS
-    )
+    readConfigValue("OUTLINE_API_TIMEOUT_MS", DEFAULT_TIMEOUT_MS)
   );
-
   const maxRetries = Number(
-    readConfigValue(
-      "OUTLINE_API_MAX_RETRIES",
-      DEFAULT_MAX_RETRIES
-    )
+    readConfigValue("OUTLINE_API_MAX_RETRIES", DEFAULT_MAX_RETRIES)
   );
 
   if (!baseUrl) {
-    throw new Error(
-      "OUTLINE_BASE_URL belum dikonfigurasi."
-    );
+    throw new Error("OUTLINE_BASE_URL belum dikonfigurasi.");
   }
 
   if (!apiKey) {
-    throw new Error(
-      "OUTLINE_API_KEY belum dikonfigurasi."
-    );
+    throw new Error("OUTLINE_API_KEY belum dikonfigurasi.");
   }
 
   if (!collectionId) {
     throw new Error(
-      "OUTLINE_COLLECTION_ID belum dikonfigurasi. " +
-      "Collection super knowledge base wajib ditentukan."
+      "OUTLINE_COLLECTION_ID belum dikonfigurasi. Collection knowledge wajib ditentukan."
     );
   }
 
@@ -76,41 +46,28 @@ function getOutlineConfig() {
     apiKey,
     collectionId,
     collectionName,
-
     timeoutMs:
-      Number.isFinite(timeoutMs) &&
-      timeoutMs > 0
+      Number.isFinite(timeoutMs) && timeoutMs > 0
         ? timeoutMs
         : DEFAULT_TIMEOUT_MS,
-
     maxRetries:
-      Number.isFinite(maxRetries) &&
-      maxRetries >= 0
+      Number.isFinite(maxRetries) && maxRetries >= 0
         ? maxRetries
         : DEFAULT_MAX_RETRIES,
   };
 }
 
 function sleep(ms) {
-  return new Promise((resolve) =>
-    setTimeout(resolve, ms)
-  );
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function shouldRetry(status) {
-  return (
-    status === 408 ||
-    status === 429 ||
-    status >= 500
-  );
+  return status === 408 || status === 429 || status >= 500;
 }
 
 async function readResponseBody(response) {
   const raw = await response.text();
-
-  if (!raw) {
-    return {};
-  }
+  if (!raw) return {};
 
   try {
     return JSON.parse(raw);
@@ -120,107 +77,50 @@ async function readResponseBody(response) {
 }
 
 /**
- * Mengambil object dokumen dari berbagai kemungkinan
- * bentuk response Outline.
+ * Memanggil endpoint RPC Outline, misalnya:
+ * - documents.search
+ * - documents.info
+ * - documents.list
  */
-function extractOutlineDocument(responseBody) {
-  if (!responseBody) {
-    return null;
-  }
-
-  return (
-    responseBody.data?.document ||
-    responseBody.data ||
-    responseBody.document ||
-    responseBody
-  );
-}
-
-/**
- * Memanggil endpoint RPC Outline,
- * misalnya documents.search atau documents.info.
- */
-export async function callOutlineApi(
-  endpoint,
-  payload = {}
-) {
+export async function callOutlineApi(endpoint, payload = {}) {
   const config = getOutlineConfig();
-
-  const cleanEndpoint = String(
-    endpoint || ""
-  )
+  const cleanEndpoint = String(endpoint || "")
     .replace(/^\/+/, "")
     .replace(/^api\//, "");
-
-  const url =
-    `${config.baseUrl}/api/${cleanEndpoint}`;
+  const url = `${config.baseUrl}/api/${cleanEndpoint}`;
 
   let lastError;
 
-  for (
-    let attempt = 0;
-    attempt <= config.maxRetries;
-    attempt += 1
-  ) {
-    const controller =
-      new AbortController();
-
-    const timeout = setTimeout(
-      () => controller.abort(),
-      config.timeoutMs
-    );
+  for (let attempt = 0; attempt <= config.maxRetries; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
 
     try {
       const response = await fetch(url, {
         method: "POST",
-
         headers: {
-          Authorization:
-            `Bearer ${config.apiKey}`,
-
-          "Content-Type":
-            "application/json",
-
-          Accept:
-            "application/json",
+          Authorization: `Bearer ${config.apiKey}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
         },
-
         body: JSON.stringify(payload),
-
         signal: controller.signal,
       });
 
-      const body =
-        await readResponseBody(response);
+      const body = await readResponseBody(response);
 
-      if (
-        !response.ok ||
-        body?.ok === false
-      ) {
-        const message =
-          body?.message ||
-          body?.error ||
-          `HTTP ${response.status}`;
-
+      if (!response.ok || body?.ok === false) {
+        const message = body?.message || body?.error || `HTTP ${response.status}`;
         const error = new Error(
           `Outline API ${cleanEndpoint} gagal: ${message}`
         );
-
         error.status = response.status;
         error.endpoint = cleanEndpoint;
-        error.outlineError =
-          body?.error;
+        error.outlineError = body?.error;
 
-        if (
-          attempt < config.maxRetries &&
-          shouldRetry(response.status)
-        ) {
+        if (attempt < config.maxRetries && shouldRetry(response.status)) {
           lastError = error;
-
-          await sleep(
-            500 * 2 ** attempt
-          );
-
+          await sleep(500 * 2 ** attempt);
           continue;
         }
 
@@ -232,29 +132,19 @@ export async function callOutlineApi(
       const normalizedError =
         error?.name === "AbortError"
           ? new Error(
-              `Outline API ${cleanEndpoint} timeout ` +
-              `setelah ${config.timeoutMs}ms`
+              `Outline API ${cleanEndpoint} timeout setelah ${config.timeoutMs}ms`
             )
           : error;
 
       lastError = normalizedError;
 
       const isNetworkError =
-        normalizedError?.name ===
-          "TypeError" ||
-        normalizedError?.code ===
-          "ECONNRESET" ||
-        normalizedError?.code ===
-          "ETIMEDOUT";
+        normalizedError?.name === "TypeError" ||
+        normalizedError?.code === "ECONNRESET" ||
+        normalizedError?.code === "ETIMEDOUT";
 
-      if (
-        attempt < config.maxRetries &&
-        isNetworkError
-      ) {
-        await sleep(
-          500 * 2 ** attempt
-        );
-
+      if (attempt < config.maxRetries && isNetworkError) {
+        await sleep(500 * 2 ** attempt);
         continue;
       }
 
@@ -264,203 +154,120 @@ export async function callOutlineApi(
     }
   }
 
-  throw (
-    lastError ||
-    new Error(
-      `Outline API ${cleanEndpoint} gagal tanpa detail.`
-    )
-  );
+  throw lastError || new Error(`Outline API ${cleanEndpoint} gagal tanpa detail.`);
 }
 
 /**
- * Mencari knowledge HANYA dari collection
- * PT Tricada Intronik yang ditentukan di .env.
- *
- * Parameter collectionId tetap diterima untuk menjaga
- * kompatibilitas dengan kode lama, tetapi tidak dapat
- * mengganti collection yang telah dikunci di backend.
+ * Search selalu dikunci ke collection dari .env.
  */
 export async function searchOutlineDocuments(
   query,
-  {
-    limit = 3,
-    offset = 0,
-    collectionId,
-  } = {}
+  { limit = 3, offset = 0, collectionId } = {}
 ) {
   const config = getOutlineConfig();
-
-  const cleanQuery = String(
-    query || ""
-  )
-    .replace(/\s+/g, " ")
-    .trim();
+  const cleanQuery = String(query || "").replace(/\s+/g, " ").trim();
 
   if (!cleanQuery) {
-    throw new Error(
-      "Query pencarian Outline tidak boleh kosong."
-    );
+    throw new Error("Query pencarian Outline tidak boleh kosong.");
   }
 
-  /*
-   * Jika kode lain mencoba mengirim collection berbeda,
-   * abaikan dan tetap gunakan collection dari .env.
-   */
-  if (
-    collectionId &&
-    collectionId !== config.collectionId
-  ) {
+  if (collectionId && collectionId !== config.collectionId) {
     console.warn(
-      "⚠️ Collection ID dari pemanggil diabaikan. " +
-      `Knowledge dikunci ke collection ` +
-      `"${config.collectionName}" ` +
-      `(${config.collectionId}).`
+      `⚠️ Collection ${collectionId} diabaikan. Search dikunci ke ${config.collectionName}.`
     );
   }
 
-  const safeLimit = Math.min(
-    Math.max(
-      Number(limit) || 3,
-      1
-    ),
-    10
+  const safeLimit = Math.min(Math.max(Number(limit) || 3, 1), 25);
+  const safeOffset = Math.max(Number(offset) || 0, 0);
+
+  console.log(
+    `🔎 Outline search: "${cleanQuery}" di collection "${config.collectionName}"`
   );
 
-  const safeOffset = Math.max(
-    Number(offset) || 0,
-    0
-  );
-
-  const payload = {
+  return callOutlineApi("documents.search", {
     query: cleanQuery,
     limit: safeLimit,
     offset: safeOffset,
-
-    // Collection selalu dikunci dari konfigurasi backend.
-    collectionId:
-      config.collectionId,
-  };
-
-  console.log(
-    `📚 Outline search: "${cleanQuery}" ` +
-    `di collection "${config.collectionName}"`
-  );
-
-  const result = await callOutlineApi(
-    "documents.search",
-    payload
-  );
-
-  return {
-    ...result,
-
-    knowledge_scope: {
-      collection_id:
-        config.collectionId,
-
-      collection_name:
-        config.collectionName,
-    },
-  };
+    collectionId: config.collectionId,
+  });
 }
 
 /**
- * Mengambil detail dokumen dan memastikan dokumen
- * tidak berasal dari collection lain.
+ * Mengambil katalog judul dokumen dari collection yang dikunci.
+ * Digunakan sebagai fallback semantic-title matching ketika documents.search kosong.
  */
-export async function getOutlineDocument(id) {
+export async function listOutlineDocuments({
+  limit = DEFAULT_LIST_LIMIT,
+  offset = 0,
+  collectionId,
+} = {}) {
   const config = getOutlineConfig();
 
-  const cleanId = String(
-    id || ""
-  ).trim();
-
-  if (!cleanId) {
-    throw new Error(
-      "ID dokumen Outline tidak tersedia."
+  if (collectionId && collectionId !== config.collectionId) {
+    console.warn(
+      `⚠️ Collection ${collectionId} diabaikan. Listing dikunci ke ${config.collectionName}.`
     );
   }
 
-  const result = await callOutlineApi(
-    "documents.info",
-    {
-      id: cleanId,
-    }
-  );
+  const safeLimit = Math.min(Math.max(Number(limit) || DEFAULT_LIST_LIMIT, 1), 100);
+  const safeOffset = Math.max(Number(offset) || 0, 0);
 
+  return callOutlineApi("documents.list", {
+    collectionId: config.collectionId,
+    limit: safeLimit,
+    offset: safeOffset,
+  });
+}
+
+export async function getOutlineDocument(id) {
+  const config = getOutlineConfig();
+  const cleanId = String(id || "").trim();
+
+  if (!cleanId) {
+    throw new Error("ID dokumen Outline tidak tersedia.");
+  }
+
+  const result = await callOutlineApi("documents.info", { id: cleanId });
   const document =
-    extractOutlineDocument(result);
+    result?.data?.document || result?.data || result?.document || result;
 
-  /*
-   * Validasi keamanan kedua.
-   * Search sudah dibatasi collectionId,
-   * tetapi documents.info juga diverifikasi.
-   */
   if (
     document?.collectionId &&
-    document.collectionId !==
-      config.collectionId
+    document.collectionId !== config.collectionId
   ) {
     throw new Error(
-      `Dokumen "${cleanId}" bukan berasal dari ` +
-      `collection super knowledge base ` +
-      `"${config.collectionName}".`
+      `Dokumen ${cleanId} bukan berasal dari collection ${config.collectionName}.`
     );
   }
 
   return result;
 }
 
-export function buildOutlineDocumentUrl(
-  document = {}
-) {
-  const { baseUrl } =
-    getOutlineConfig();
+export function buildOutlineDocumentUrl(document = {}) {
+  const { baseUrl } = getOutlineConfig();
+  const rawUrl = document.url || document.publishedUrl;
 
-  const rawUrl =
-    document.url ||
-    document.publishedUrl;
-
-  if (
-    rawUrl &&
-    /^https?:\/\//i.test(rawUrl)
-  ) {
+  if (rawUrl && /^https?:\/\//i.test(rawUrl)) {
     return rawUrl;
   }
 
   if (rawUrl) {
-    return (
-      `${baseUrl}` +
-      `${rawUrl.startsWith("/") ? "" : "/"}` +
-      `${rawUrl}`
-    );
+    return `${baseUrl}${rawUrl.startsWith("/") ? "" : "/"}${rawUrl}`;
   }
 
   if (document.urlId) {
-    return (
-      `${baseUrl}/doc/` +
-      `${document.urlId}`
-    );
+    return `${baseUrl}/doc/${document.urlId}`;
   }
 
   return null;
 }
 
-/**
- * Informasi scope knowledge yang sedang aktif.
- * Bisa digunakan untuk log atau health check.
- */
 export function getOutlineKnowledgeScope() {
   const config = getOutlineConfig();
 
   return {
-    collection_id:
-      config.collectionId,
-
-    collection_name:
-      config.collectionName,
-
-    base_url:
-      config.baseUrl,
+    collection_id: config.collectionId,
+    collection_name: config.collectionName,
+    base_url: config.baseUrl,
   };
 }
