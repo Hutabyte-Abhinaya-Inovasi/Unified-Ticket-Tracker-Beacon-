@@ -244,10 +244,11 @@ export async function getTicketById(ticketId) {
     return null;
   }
 
+  console.log(`🔍 [DEBUG] getTicketById called with: "${ticketId}", length: ${ticketId.length}`);
   const { data, error } = await supabase
     .from('Unified_Ticket_Tracker')
     .select('*')
-    .eq('ticket_id', ticketId)
+    .eq('ticket_id', ticketId.trim())
     .single();   // .single() karena hanya 1 record
 
   if (error) {
@@ -255,8 +256,8 @@ export async function getTicketById(ticketId) {
       console.warn(`⚠️ Ticket dengan ID ${ticketId} tidak ditemukan`);
       return null;
     }
-    console.error(`❌ Gagal mengambil ticket ${ticketId}:`, error.message);
-    return null;
+    console.error(`❌ Gagal mengambil ticket ${ticketId}:`, error);
+    throw new Error(`Database error: ${error.message || error.code || 'Unknown error'}`);
   }
 
   return data;
@@ -406,8 +407,8 @@ export async function searchTickets(keyword) {
     .limit(30);
 
   if (error) {
-    console.error("❌ Gagal mencari tiket:", error.message);
-    return [];
+    console.error("❌ Gagal mencari tiket:", error);
+    throw new Error(`Database error: ${error.message || error.code || 'Unknown error'}`);
   }
 
   return data || [];

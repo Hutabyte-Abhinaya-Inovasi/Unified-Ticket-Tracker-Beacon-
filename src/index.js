@@ -7,7 +7,7 @@ import { connectWhatsApp } from "./infrastructure/whatsapp/whatsappService.js";
 import { initTelegramBot } from "./infrastructure/telegram/telegramService.js";
 import { startTelegramUserListener } from "./infrastructure/telegram/telegramUserListener.js";
 import { startSlaWorker } from "./infrastructure/telegram/slaWorker.js";
-import { startOutlookListener } from "./infrastructure/outlook/outlookService.js"; 
+import { startOutlookListener } from "./infrastructure/outlook/outlookService.js";
 // import { authorize } from "./config/gmailAuth.js";
 // import { forwardUnreadEmail } from "./usecases/forwardUnreadEmail.js";
 import { startGmailListener } from "./infrastructure/gmail/gmailListener.js";
@@ -16,9 +16,9 @@ import { startIntakeMessageListener } from "./usecases/intakeMessageListener.js"
 console.log("🚀 Unified Incident Intake System");
 console.log("=====================================");
 
-let whatsappSock        = null;
-let telegramUserClient  = null;
-let stopEmailListener   = null;
+let whatsappSock = null;
+let telegramUserClient = null;
+let stopEmailListener = null;
 
 async function start() {
   try {
@@ -49,7 +49,7 @@ async function start() {
 
     console.log("📱 Memulai WhatsApp Connection...");
     whatsappSock = await connectWhatsApp();
-    
+
     console.log("🔗 Memulai ClickUp Listener...");
     startClickupListener();
 
@@ -63,7 +63,7 @@ async function start() {
       console.log("   • Telegram Personal DM Listener (MTProto)");
     }
     console.log("   • WhatsApp Listener");
-    
+
     console.log("=====================================");
 
     console.log("💡 Ketik /menu di Telegram untuk membuka menu utama");
@@ -87,7 +87,7 @@ process.on("SIGINT", async () => {
 
     if (telegramUserClient) {
       console.log("📴 Menutup Telegram User connection...");
-      await telegramUserClient.disconnect().catch(() => {});
+      await telegramUserClient.disconnect().catch(() => { });
     }
 
     // Telegram Bot tidak perlu disconnect manual karena polling akan ikut mati

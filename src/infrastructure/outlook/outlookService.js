@@ -3,7 +3,6 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { PublicClientApplication } from "@azure/msal-node";
 import { saveRawIntakeMessage } from "../../database/supabase.js";
-import { processRawMessage } from "../../usecases/processRawMessage.js";
 
 const enabled = String(process.env.OUTLOOK_ENABLED || "false").toLowerCase() === "true";
 const tenantId = process.env.AZURE_TENANT_ID;
@@ -147,15 +146,8 @@ async function processOutlookMessage(token, message) {
     idempotency_key: `outlook:${message.id}`,
   };
 
-  const inserted = await saveRawIntakeMessage(rawPayload);
-  if (!inserted) {
-    console.warn(`⚠️ Email tidak disimpan, sehingga belum ditandai read: ${subject}`);
-    return;
-  }
-
-  await processRawMessage({ ...rawPayload, ...inserted });
-  // Email tidak ditandai sudah dibaca karena permission hanya Mail.Read.
-  console.log(`✅ Email Outlook selesai diproses: ${subject}`);
+  // Simpan ke intake_message. intakeMessageListener.js akan mengirim kandidat ke Telegram.
+  console.log(`✅ Email Outlook disimpan ke intake_message: ${subject}`);
 }
 
 async function pollOutlook() {

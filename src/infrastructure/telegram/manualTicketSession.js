@@ -390,17 +390,17 @@ export function isRequiredField(field) {
 export function getFieldPrompt(field, canSkip = false, prefix = 'fq') {
   const question = FIELD_QUESTIONS[field] || `Isi nilai untuk ${DB_FIELD_LABELS[field] || FIELD_LABELS[field] || field}:`;
 
-  // Gunakan options repair (rq_) jika field DB seperti priority/status
-  let options = null;
-  if (prefix === 'rq') {
-    options = FIELD_OPTIONS[field] || null;
-  } else {
-    options = FIELD_OPTIONS[field] || null;
-  }
+  const options = FIELD_OPTIONS[field] || null;
 
   let inlineKeyboard = [];
   if (options) {
-    inlineKeyboard = [...options];
+    // Ubah prefix callback_data (fq_ atau rq_) agar sesuai dengan prefix yang diminta (misal: rq_ untuk repair mode)
+    inlineKeyboard = options.map(row =>
+      row.map(btn => ({
+        ...btn,
+        callback_data: btn.callback_data.replace(/^(fq|rq)_/, `${prefix}_`)
+      }))
+    );
   }
 
   if (canSkip) {

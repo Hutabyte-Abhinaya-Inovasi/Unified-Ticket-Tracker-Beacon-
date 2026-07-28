@@ -9,7 +9,6 @@ import {
 import qrcode from "qrcode-terminal";
 import { saveRawIntakeMessage, supabase } from "../../database/supabase.js";
 import { useSupabaseAuthState } from "./supabaseAuthState.js";
-import { processRawMessage } from "../../usecases/processRawMessage.js";
 
 const AUTH_FOLDER = "./auth_info";
 
@@ -132,11 +131,16 @@ export async function connectWhatsApp() {
       console.log(`❌ WA disconnected (${code || "unknown"})`);
 
       if (shouldReconnect) {
-        console.log("🔄 Reconnecting...");
+        // QR timeout (408) atau connection failed — beri jeda lebih panjang
+        const isQrTimeout = code === 408 || code === 515;
+        const delay = isQrTimeout ? 15000 : 5000;
+        console.log(`🔄 Reconnecting in ${delay / 1000}s...`);
+        sock = null;
+        setTimeout(connectWhatsApp, delay);
+      } else {
+        console.log("🚫 WA Logged out. Scan QR untuk login ulang.");
         sock = null;
         setTimeout(connectWhatsApp, 5000);
-      } else {
-        console.log("🚫 Logged out");
       }
     }
   });
@@ -207,25 +211,11 @@ export async function connectWhatsApp() {
       });
 
 
-      // ── STEP 2: Proses raw message (deteksi threading + tiket) ──────────
-      // Seluruh logika (small talk, AI relevance, duplikat, tiket baru) ada
-      // di processRawMessage.js — whatsappService cukup simpan raw lalu lempar ke sana.
+      // ── STEP 2: Tunggu konfirmasi operator ──────────────────────────────
+      // Raw message tersimpan di intake_message. intakeMessageListener.js
+      // akan secara otomatis menangkap data baru dan mengirim kandidat ke Telegram.
       if (raw?.id) {
-        await processRawMessage(raw);
-      } else {
-        // raw save gagal → buat objek manual agar tetap bisa diproses
-        await processRawMessage({
-          id:              null,
-          source_channel:  isGrp ? 'wa_group' : 'wa_dm',
-          source_ref:      remoteJid,
-          sender:          participantId ? `${senderName} (${participantId})` : senderName,
-          body_text:       text,
-          raw_payload:     {
-            group_name:      getGroupSubject(remoteJid),
-            wa_message_id:   msg.key.id,
-          },
-          idempotency_key: msg.key.id,
-        });
+        console.log(`   📥 WhatsApp Intake ${raw.id} tersimpan dan menunggu konfirmasi di Telegram.`);
       }
 
     } catch (err) {

@@ -24,7 +24,6 @@ import { env } from '../../config/env.js';
 import { saveRawIntakeMessage, supabase } from '../../database/supabase.js';
 import { extractTicketFields } from '../ai/openaiService.js';
 import { sendIncidentAlert } from './telegramService.js';
-import { processRawMessage } from '../../usecases/processRawMessage.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
