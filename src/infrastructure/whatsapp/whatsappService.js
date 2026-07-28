@@ -102,12 +102,12 @@ export async function connectWhatsApp() {
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
-      console.log("\n" + "=".repeat(60));
-      console.log("📱 SCAN QR CODE DENGAN WHATSAPP");
-      console.log("=".repeat(60));
-      qrcode.generate(qr, { small: true });
-    }
+    // if (qr) {
+    //   console.log("\n" + "=".repeat(60));
+    //   console.log("📱 SCAN QR CODE DENGAN WHATSAPP");
+    //   console.log("=".repeat(60));
+    //   qrcode.generate(qr, { small: true });
+    // }
 
     if (connection === "open") {
       console.log("✅ WhatsApp Connected successfully!");

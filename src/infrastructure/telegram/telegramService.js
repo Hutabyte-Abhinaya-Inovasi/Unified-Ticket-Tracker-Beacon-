@@ -1991,7 +1991,7 @@ async function handleRepairFollowUpCallback(query, chatId, userId, data) {
 
 // ================== HANDLER: REPAIR PUBLISH → UPDATE DB + KIRIM KE BEACON ==================
 async function handleRepairPublish(query, chatId, userId, ticketId) {
-  const BEACON_CHAT_ID = (env.TG_BEACON_CHAT_ID || '-5546265953').trim();
+  const TARGET_CHAT_ID = (env.TG_UTT_CHAT_ID || '-5546265953').trim();
 
   const session = getSession(chatId.toString(), userId);
   if (!session || session.mode !== 'REPAIR') {
@@ -2039,11 +2039,11 @@ async function handleRepairPublish(query, chatId, userId, ticketId) {
     // Ambil data tiket terbaru dari DB
     const updatedTicket = await getTicketById(ticketId);
 
-    // Kirim pesan update ke Beacon
-    await sendFinalTicketToBeacon(updatedTicket || { ...originalTicket, ...updatePayload }, BEACON_CHAT_ID, updatedTicket?.status || originalTicket.status, true);
+    // Kirim/update pesan ke grup Beacon Ticket Operations (-5546265953)
+    await sendFinalTicketToBeacon(updatedTicket || { ...originalTicket, ...updatePayload }, TARGET_CHAT_ID, updatedTicket?.status || originalTicket.status, true);
 
     await bot.sendMessage(chatId,
-      `✅ <b>Tiket berhasil diupdate dan re-published ke Beacon!</b>\n\n` +
+      `✅ <b>Tiket berhasil diupdate dan re-published!</b>\n\n` +
       `🎫 Ticket ID: <code>${escapeHTML(ticketId)}</code>\n` +
       `📅 Tanggal awal tiket: <i>terjaga, tidak berubah</i>\n\n` +
       `Ketik /menu untuk kembali ke menu utama.`,
@@ -2107,8 +2107,14 @@ function formatConfirmedTicketMessage(ticket) {
 async function sendFinalTicketToBeacon(ticket, beaconChatId, status = 'In Progress', isUpdate = false) {
   const botInstance = initTelegramBot();
 
-  // Untuk UPDATE tiket (repair/edit), gunakan format konfirmasi dengan tombol Edit & Eskalasi
-  // Untuk TIKET BARU, gunakan format KANDIDAT dengan tombol Ini Tiket & Bukan Tiket
+  // Target grup default untuk publikasi/re-publikasi tiket adalah TG_UTT_CHAT_ID (-5546265953)
+  const defaultGroup = (env.TG_UTT_CHAT_ID || '-5546265953').trim();
+
+  // Tentukan target chat ID (gunakan beaconChatId jika berupa ID grup berawalan '-', jika DM gunakan defaultGroup)
+  const targetGroup = (beaconChatId && String(beaconChatId).startsWith('-'))
+    ? beaconChatId
+    : defaultGroup;
+
   let messageText;
   let keyboard;
 
@@ -2129,6 +2135,22 @@ async function sendFinalTicketToBeacon(ticket, beaconChatId, status = 'In Progre
         ]
       }
     };
+
+    // Jika tiket sudah memiliki pesan yang pernah dikirim ke grup (bukan DM), update pesan lamanya langsung
+    if (ticket.telegram_chat_id && ticket.telegram_message_id && String(ticket.telegram_chat_id).startsWith('-')) {
+      try {
+        await botInstance.editMessageText(messageText, {
+          chat_id: ticket.telegram_chat_id,
+          message_id: parseInt(ticket.telegram_message_id, 10),
+          parse_mode: 'HTML',
+          ...keyboard
+        });
+        console.log(`✅ Pesan tiket ${ticket.ticket_id} berhasil di-update di grup ${ticket.telegram_chat_id}`);
+        return ticket.telegram_message_id;
+      } catch (editErr) {
+        console.warn(`⚠️ Gagal edit pesan lama di grup ${ticket.telegram_chat_id}, akan kirim pesan baru ke ${targetGroup}:`, editErr.message);
+      }
+    }
   } else {
     // Tiket baru: tampilkan sebagai KANDIDAT
     messageText = formatCandidateTicketMessage({ ...ticket, status });
@@ -2145,7 +2167,7 @@ async function sendFinalTicketToBeacon(ticket, beaconChatId, status = 'In Progre
   }
 
   try {
-    const sent = await botInstance.sendMessage(beaconChatId, messageText, {
+    const sent = await botInstance.sendMessage(targetGroup, messageText, {
       parse_mode: 'HTML', ...keyboard,
     });
 
@@ -2153,14 +2175,14 @@ async function sendFinalTicketToBeacon(ticket, beaconChatId, status = 'In Progre
       await updateTicket(ticket.ticket_id, {
         telegram_sent: true,
         telegram_message_id: sent.message_id.toString(),
-        telegram_chat_id: beaconChatId,
+        telegram_chat_id: targetGroup,
       });
     }
 
-    console.log(`Tiket ${ticket.ticket_id} terkirim ke Beacon (msg: ${sent?.message_id})`);
+    console.log(`Tiket ${ticket.ticket_id} terkirim ke grup ${targetGroup} (msg: ${sent?.message_id})`);
     return sent?.message_id;
   } catch (err) {
-    console.error(`Gagal kirim tiket ke Beacon:`, err.message);
+    console.error(`Gagal kirim tiket ke grup ${targetGroup}:`, err.message);
     return null;
   }
 }
