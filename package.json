@@ -20,6 +20,7 @@
     "googleapis": "^171.4.0",
     "html-to-text": "^9.0.5",
     "imap": "^0.8.19",
+    "imapflow": "^1.6.1",
     "mailparser": "^3.9.14",
     "node-fetch": "^3.3.2",
     "node-telegram-bot-api": "^0.67.0",
