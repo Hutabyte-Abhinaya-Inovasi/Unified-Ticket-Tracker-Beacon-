@@ -3,7 +3,7 @@
 import { createClient } from '@supabase/supabase-js';
 import WebSocket from 'ws';
 import { env } from '../config/env.js';
-import { createClickUpTask } from "../infrastructure/clickup/clickupService.js";
+//import { createClickUpTask } from "../infrastructure/clickup/clickupService.js";
 
 // Polyfill WebSocket untuk Node.js < 22 agar Supabase Realtime berfungsi
 globalThis.WebSocket = WebSocket;
@@ -117,7 +117,7 @@ export async function saveEmailLog(email, analysis = {}, telegramSent = false, t
       return null;
     }
 
-    await createClickUpTask(payload);
+    //await createClickUpTask(payload);
 
     console.log(`✅ Ticket berhasil disimpan: ${ticketId}`);
     return ticketId;

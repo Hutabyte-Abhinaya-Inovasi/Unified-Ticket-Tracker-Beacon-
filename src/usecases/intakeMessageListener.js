@@ -31,12 +31,12 @@ export function startIntakeMessageListener() {
             id: raw.id,
             ticket_id: raw.ticket_id,
 
-            from: original.from || raw.sender,
-            subject: original.subject || "(No Subject)",
-            body: original.body || raw.body_text,
+            from: raw.sender || "Unknown", // raw.sender sudah disimpan sebagai string oleh outlookService
+            subject: original.subject || raw.subject || "(No Subject)",
+            body: raw.body_text || original.body || original.text || "(Tidak ada isi pesan)",
 
             source: raw.source_channel,
-            received_at: raw.received_at
+            received_at: raw.received_at ||  raw.created_at || new Date().toISOString()
         };
 
         console.log("📨 Telegram Data:", telegramData);

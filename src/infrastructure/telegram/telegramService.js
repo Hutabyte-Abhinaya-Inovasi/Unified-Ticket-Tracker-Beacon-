@@ -1617,10 +1617,28 @@ function formatCandidateTicketMessage(ticket) {
   };
   const channel = channelMap[(ticket.source || '').toLowerCase()] || (ticket.source || 'System');
 
-  const diterima = ticket.processed_at
-    ? new Date(ticket.processed_at).toLocaleString('id-ID', {
-        timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
-        year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+  // const diterima = ticket.processed_at
+  //   ? new Date(ticket.processed_at).toLocaleString('id-ID', {
+  //       timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
+  //       year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+  //     })
+  //   : '-';
+
+  const receivedAt =
+  ticket.received_at ||
+  ticket.intake_received_at ||
+  ticket.processed_at ||
+  ticket.created_at;
+
+  const diterima = receivedAt
+    ? new Date(receivedAt).toLocaleString('id-ID', {
+        timeZone: 'Asia/Jakarta',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
       })
     : '-';
 
@@ -1665,10 +1683,28 @@ function formatConfirmedTicketMessage(ticket) {
   };
   const channel = channelMap[(ticket.source || '').toLowerCase()] || (ticket.source || 'System');
 
-  const diterima = ticket.processed_at
-    ? new Date(ticket.processed_at).toLocaleString('id-ID', {
-        timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
-        year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+  // const diterima = ticket.processed_at
+  //   ? new Date(ticket.processed_at).toLocaleString('id-ID', {
+  //       timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short',
+  //       year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+  //     })
+  //   : '-';
+
+  const receivedAt =
+  ticket.received_at ||
+  ticket.intake_received_at ||
+  ticket.processed_at ||
+  ticket.created_at;
+
+  const diterima = receivedAt
+    ? new Date(receivedAt).toLocaleString('id-ID', {
+        timeZone: 'Asia/Jakarta',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
       })
     : '-';
 
@@ -2015,19 +2051,27 @@ async function sendIncidentAlert(email, analysis = {}, customMessage = null) {
     console.error('⚠️ Gagal mengirim notifikasi alert ke Beacon:', err.message);
   }
 
-  const dbChatId = email.group_id && telegramChatId
-    ? `${telegramChatId}|${email.group_id}` : telegramChatId;
+//   const dbChatId = email.group_id && telegramChatId
+//     ? `${telegramChatId}|${email.group_id}` : telegramChatId;
 
-  // Set intake_received_at = waktu notifikasi kandidat dikirim (start SLA Konfirmasi 15 Menit)
-  const intakeNow = new Date().toISOString();
-  await saveEmailLog(
-    { ...email, intake_received_at: intakeNow },
-    activeAnalysis,
-    !!telegramMessageId,
+//   // Set intake_received_at = waktu notifikasi kandidat dikirim (start SLA Konfirmasi 15 Menit)
+//   const intakeNow = new Date().toISOString();
+//   await saveEmailLog(
+//     { ...email, intake_received_at: intakeNow },
+//     activeAnalysis,
+//     !!telegramMessageId,
+//     telegramMessageId,
+//     dbChatId
+//   );
+// }
+
+return {
     telegramMessageId,
-    dbChatId
-  );
+    telegramChatId
+  };
 }
+
+
 
 // ====================== UPDATE TICKET STATUS AND SYNC MESSAGE ======================
 export async function updateIncidentStatusAndMessage(ticketId, newStatus, isAutomatic = true) {

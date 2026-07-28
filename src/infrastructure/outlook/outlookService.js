@@ -22,6 +22,7 @@ const imapConfig = {
 let imap = null;
 let reconnectAttempts = 0;
 let reconnectTimer = null;
+let lastSeenUid = null;
 
 function getReconnectDelay() {
   const delay = Math.min(5000 * Math.pow(2, reconnectAttempts), 60000);
@@ -83,74 +84,181 @@ function connectIMAP() {
 }
 
 function openInbox() {
-  imap.openBox("INBOX", false, (err) => {
+  imap.openBox("INBOX", false, (err, box) => {
     if (err) {
       console.error("❌ Gagal buka INBOX:", err.message);
       return scheduleReconnect();
     }
+
     console.log("📬 INBOX opened");
-    fetchUnread();
-    imap.on("mail", () => fetchUnread());
+
+    // Saat program pertama hidup:
+    // catat UID terakhir yang sudah ada di mailbox.
+    // Jangan proses email-email lama.
+    lastSeenUid = box.uidnext - 1;
+
+    console.log(`📌 Mulai listen setelah UID: ${lastSeenUid}`);
+    console.log("👂 Menunggu email BARU...");
+
+    imap.on("mail", () => {
+      fetchNewEmails();
+    });
   });
 }
 
-function fetchUnread() {
-  imap.search(["UNSEEN"], (err, results) => {
-    if (err) {
-        console.error(err);
-        return;
+function htmlToText(html = "") {
+  return String(html)
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<\/div>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function getEmailBody(parsed) {
+  // Prioritas 1: plain text
+  if (parsed.text && parsed.text.trim()) {
+    return parsed.text.trim();
+  }
+
+  // Prioritas 2: HTML
+  if (parsed.html) {
+    const html =
+      typeof parsed.html === "string"
+        ? parsed.html
+        : parsed.html.toString();
+
+    const text = htmlToText(html);
+
+    if (text) {
+      return text;
     }
+  }
 
-    console.log("UNSEEN results:", results);
+  // Email memang tidak mempunyai body yang bisa dibaca
+  return "(Email tidak memiliki isi teks)";
+}
 
-    if (!results?.length) {
-        console.log("Tidak ada email UNSEEN");
+function fetchNewEmails() {
+  if (lastSeenUid === null) {
+    console.log("⚠️ lastSeenUid belum tersedia.");
+    return;
+  }
+
+  const startUid = lastSeenUid + 1;
+
+  console.log(`📨 Mengecek email baru mulai UID ${startUid}...`);
+
+  imap.search(
+    [["UID", `${startUid}:*`]],
+    (err, results) => {
+      if (err) {
+        console.error("❌ Gagal mencari email baru:", err.message);
         return;
-    }
+      }
 
-    const f = imap.fetch(results, {
-      bodies: "",
-      markSeen: false, // ubah ke true nanti kalau sudah production
-    });
+      if (!results?.length) {
+        console.log("📭 Tidak ada email baru.");
+        return;
+      }
 
-    f.on("message", (msg, seqno) => {
-      msg.on("body", async (stream) => {
-        try {
-          const parsed = await simpleParser(stream);
-          console.log("📨 Email masuk");
-          console.log("Subject :", parsed.subject);
-          console.log("From    :", parsed.from?.text);
-          console.log("Date    :", parsed.date);
-          await saveRawIntakeMessage({
-              source_channel: "email",
-              source_ref: parsed.messageId,
-              sender: parsed.from?.text || "Unknown",
-              thread_ref: parsed.messageId,
-              received_at: parsed.date,
-              body_text: parsed.text,
-              attachments: {
-                  count: parsed.attachments?.length || 0,
-              },
-              raw_payload: parsed,
-              idempotency_key: `email-${parsed.messageId}`,
-          });
-          console.log("✅ Email berhasil disimpan ke raw_intake_messages");
-        } catch (err) {
-          console.error("❌ Error processing email:", err.message);
-        }
+      console.log(`📬 Ditemukan ${results.length} email baru`);
+
+      const f = imap.fetch(results, {
+        bodies: "",
+        markSeen: false,
       });
-    });
-    f.once("error", (err) => {
-      console.error("Fetch error:", err);
-    });
 
-    f.once("end", () => {
-      console.log("✅ Selesai memproses batch email");
-    });
+      f.on("message", (msg) => {
+        let currentUid = null;
 
-  });
+        msg.once("attributes", (attrs) => {
+          currentUid = attrs.uid;
+        });
 
+        msg.on("body", async (stream) => {
+          try {
+            const parsed = await simpleParser(stream);
 
+            console.log("===== EMAIL PARSED =====");
+            console.log("Subject :", parsed.subject);
+            console.log("From    :", parsed.from?.text);
+            console.log("Text    :", parsed.text);
+            console.log("HTML    :", parsed.html);
+            console.log("========================");
+
+            console.log("📨 EMAIL BARU");
+
+            await saveRawIntakeMessage({
+              source_channel: "email",
+
+              source_ref:
+                parsed.messageId ||
+                `imap-${currentUid}`,
+
+              sender:
+                parsed.from?.text ||
+                parsed.from?.value?.[0]?.name ||
+                parsed.from?.value?.[0]?.address ||
+                "Unknown",
+
+              thread_ref:
+                parsed.messageId ||
+                null,
+
+              received_at:
+                parsed.date || new Date(),
+
+              body_text:
+                getEmailBody(parsed),
+
+              attachments: {
+                count: parsed.attachments?.length || 0,
+              },
+
+              raw_payload: parsed,
+
+              // Pengaman duplikat
+              idempotency_key:
+                `email-${parsed.messageId || currentUid}`,
+            });
+
+            console.log("✅ Email disimpan ke intake_message");
+
+          } catch (err) {
+            console.error(
+              "❌ Error processing email:",
+              err.message
+            );
+          }
+        });
+
+        msg.once("end", () => {
+          if (currentUid && currentUid > lastSeenUid) {
+            lastSeenUid = currentUid;
+          }
+        });
+      });
+
+      f.once("error", (err) => {
+        console.error("❌ Fetch error:", err.message);
+      });
+
+      f.once("end", () => {
+        console.log("✅ Selesai memproses email baru");
+        console.log(`👂 Menunggu email setelah UID ${lastSeenUid}...`);
+      });
+    }
+  );
 }
 
 

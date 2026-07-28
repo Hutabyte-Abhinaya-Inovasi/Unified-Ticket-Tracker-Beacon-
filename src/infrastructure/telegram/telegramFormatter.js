@@ -5,6 +5,33 @@ function escapeHTML(text = "") {
         .replace(/>/g, "&gt;");
 }
 
+function getSenderName(sender) {
+    if (!sender) return "-";
+
+    // Kalau sudah string
+    if (typeof sender === "string") {
+        return sender;
+    }
+
+    // Format object dari mailparser
+    if (sender.text) {
+        return sender.text;
+    }
+
+    // Format AddressObject mailparser
+    if (sender.value?.length) {
+        const person = sender.value[0];
+
+        if (person.name && person.address) {
+            return `${person.name} <${person.address}>`;
+        }
+
+        return person.name || person.address || "-";
+    }
+
+    return "-";
+}
+
 export function formatCandidateTicket(raw) {
 
     const email = raw.raw_payload || {};
@@ -14,7 +41,7 @@ export function formatCandidateTicket(raw) {
 
 📅 Diterima : ${new Date(raw.received_at).toLocaleString("id-ID")}
 📡 Channel  : ${raw.source_channel}
-📧 Dari     : ${escapeHTML(raw.sender)}
+📧 Dari     : ${escapeHTML(getSenderName(raw.sender))}
 📨 Subject  : ${escapeHTML(email.subject ?? "-")}
 
 ━━━━━━━━━━━━━━━━━━━━━
