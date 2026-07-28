@@ -32,6 +32,7 @@ import {
   findActiveTicketsByGroupId,
   appendMessageToTicket,
   generateTicketId,
+  saveEmailLog,
   supabase,
 } from '../database/supabase.js';
 
@@ -257,6 +258,7 @@ export async function processRawMessage(rawMsg) {
     subject:    groupName,
     body:       text,
     source:     sourceChannel,
+    status:     rawMsg.is_confirmed ? 'In Progress' : 'Draft',
     group_id:   sourceRef,
     group_name: groupName,
   };
@@ -273,13 +275,18 @@ export async function processRawMessage(rawMsg) {
 
   // Kirim alert ke Telegram (dengan tombol Approve/Reject untuk L1)
   // → saveEmailLog dipanggil di dalam sendIncidentAlert
-  await sendIncidentAlert(emailObj, pendingAnalysis);
+  if (!rawMsg.skip_telegram_edit) {
+    await sendIncidentAlert(emailObj, pendingAnalysis, null, rawMsg.messageIdToEdit);
+  } else {
+    // Tetap simpan tiket ke tabel Unified_Ticket_Tracker & push ke ClickUp saat dikonfirmasi manual
+    emailObj.status = 'In Progress';
+    await saveEmailLog(emailObj, { ...pendingAnalysis, confidence_score: 100 }, true, rawMsg.messageIdToEdit);
+  }
 
   // Mark raw sebagai processed & link ke tiket baru
-  // (ClickUp akan dipush setelah L1 approve via callback handleStatusChange)
   await markRawMessageAs(rawMsg.id, 'processed', ticketId);
 
-  console.log(`   ✅ Tiket baru berhasil dibuat: ${ticketId} (menunggu konfirmasi L1)`);
+  console.log(`   ✅ Tiket baru berhasil dibuat & disimpan: ${ticketId}`);
   return { action: 'created', ticketId };
 }
 

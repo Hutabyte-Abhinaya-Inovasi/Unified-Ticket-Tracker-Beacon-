@@ -252,11 +252,23 @@ export function createRepairSession(chatId, userId, ticket, senderName = 'Unknow
  */
 export function getSession(chatId, userId) {
   const key = makeKey(chatId, userId);
-  const session = sessions.get(key);
+  let session = sessions.get(key);
+
+  // Fallback: Jika tidak ditemukan berdasarkan userId spesifik (misalnya di grup chat di mana
+  // anggota/operator lain mengklik tombol edit), cari sesi aktif di chatId yang sama.
+  if (!session && chatId) {
+    for (const [sKey, sVal] of sessions.entries()) {
+      if (sVal && sVal.chatId === chatId.toString()) {
+        session = sVal;
+        break;
+      }
+    }
+  }
+
   if (!session) return null;
 
   if (Date.now() - session.timestamp > SESSION_TIMEOUT_MS) {
-    sessions.delete(key);
+    sessions.delete(session.key || key);
     return null;
   }
 
@@ -269,7 +281,15 @@ export function getSession(chatId, userId) {
  */
 export function destroySession(chatId, userId) {
   const key = makeKey(chatId, userId);
-  sessions.delete(key);
+  if (sessions.has(key)) {
+    sessions.delete(key);
+    return;
+  }
+  for (const [sKey, sVal] of sessions.entries()) {
+    if (sVal && sVal.chatId === chatId.toString()) {
+      sessions.delete(sKey);
+    }
+  }
 }
 
 /**
@@ -390,24 +410,24 @@ export function isRequiredField(field) {
 export function getFieldPrompt(field, canSkip = false, prefix = 'fq') {
   const question = FIELD_QUESTIONS[field] || `Isi nilai untuk ${DB_FIELD_LABELS[field] || FIELD_LABELS[field] || field}:`;
 
-  // Gunakan options repair (rq_) jika field DB seperti priority/status
-  let options = null;
-  if (prefix === 'rq') {
-    options = FIELD_OPTIONS[field] || null;
-  } else {
-    options = FIELD_OPTIONS[field] || null;
-  }
+  const options = FIELD_OPTIONS[field] || null;
 
   let inlineKeyboard = [];
   if (options) {
-    inlineKeyboard = [...options];
+    // Ubah prefix callback_data (fq_ atau rq_) agar sesuai dengan prefix yang diminta (misal: rq_ untuk repair mode)
+    inlineKeyboard = options.map(row =>
+      row.map(btn => ({
+        ...btn,
+        callback_data: btn.callback_data.replace(/^(fq|rq)_/, `${prefix}_`)
+      }))
+    );
   }
 
   if (canSkip) {
     inlineKeyboard.push([{ text: '⏭ Lewati (kosongkan)', callback_data: `${prefix}_skip_${field}` }]);
   }
 
-  inlineKeyboard.push([{ text: '❌ Batalkan', callback_data: 'manual_cancel' }]);
+  inlineKeyboard.push([{ text: '❌ Batalkan', callback_data: prefix === 'rq' ? 'rq_cancel' : 'manual_cancel' }]);
 
   const keyboard = {
     reply_markup: {
@@ -544,6 +564,9 @@ ${body ? body.substring(0, 300) + (body.length > 300 ? '...' : '') : '<i>-</i>'}
   const keyboard = {
     reply_markup: {
       inline_keyboard: [
+        [
+          { text: '🤖 Edit via AI (Quick Format)', callback_data: `repair_edit_ai_${ticketId}` },
+        ],
         [
           { text: '✏️ Dari',     callback_data: `repair_edit_from_${ticketId}` },
           { text: '✏️ Subject',  callback_data: `repair_edit_subject_${ticketId}` },

@@ -52,7 +52,7 @@ export async function generateTicketId() {
       .limit(1);
 
     if (error) {
-      console.error("âŒ Error generate ticket_id:", error.message);
+      console.error("G¥î Error generate ticket_id:", error.message);
       return `TCK-${dateStr}-0001`; // Fallback
     }
 
@@ -66,11 +66,11 @@ export async function generateTicketId() {
     }
 
     const newTicketId = `TCK-${dateStr}-${String(sequence).padStart(4, '0')}`;
-    console.log(`âœ… Generated Ticket ID: ${newTicketId}`);
+    console.log(`G£à Generated Ticket ID: ${newTicketId}`);
     return newTicketId;
 
   } catch (err) {
-    console.error("âŒ Unexpected error in generateTicketId:", err);
+    console.error("G¥î Unexpected error in generateTicketId:", err);
     return `TCK-${dateStr}-0001`;
   }
 }
@@ -112,18 +112,18 @@ export async function saveEmailLog(email, analysis = {}, telegramSent = false, t
       .insert([payload]);
 
     if (error) {
-      console.error("âŒ Gagal menyimpan ticket:", error.message);
+      console.error("G¥î Gagal menyimpan ticket:", error.message);
       console.error("Payload:", payload);
       return null;
     }
 
     await createClickUpTask(payload);
 
-    console.log(`âœ… Ticket berhasil disimpan: ${ticketId}`);
+    console.log(`G£à Ticket berhasil disimpan: ${ticketId}`);
     return ticketId;
 
   } catch (err) {
-    console.error("âŒ Unexpected error in saveEmailLog:", err.message);
+    console.error("G¥î Unexpected error in saveEmailLog:", err.message);
     return null;
   }
 }
@@ -172,16 +172,16 @@ export async function saveRawTelegramDM(dmData) {
       .insert([payload]);
 
     if (error) {
-      console.error('âŒ Gagal menyimpan raw Telegram DM:', error.message);
+      console.error('G¥î Gagal menyimpan raw Telegram DM:', error.message);
       console.error('   Payload:', JSON.stringify(payload, null, 2));
       return null;
     }
 
-    console.log(`   âœ… Raw DM tersimpan ke Supabase: ${ticketId}`);
+    console.log(`   G£à Raw DM tersimpan ke Supabase: ${ticketId}`);
     return { ticket_id: ticketId, ...payload };
 
   } catch (err) {
-    console.error('âŒ Unexpected error in saveRawTelegramDM:', err.message);
+    console.error('G¥î Unexpected error in saveRawTelegramDM:', err.message);
     return null;
   }
 }
@@ -192,7 +192,7 @@ export async function saveRawTelegramDM(dmData) {
  */
 export async function updateIncidentStatus(telegramMessageId, newStatus) {
   if (!telegramMessageId) {
-    console.warn("âš ï¸ telegramMessageId kosong, update status dibatalkan");
+    console.warn("GÜán+Å telegramMessageId kosong, update status dibatalkan");
     return false;
   }
 
@@ -211,11 +211,11 @@ export async function updateIncidentStatus(telegramMessageId, newStatus) {
     .eq('telegram_message_id', telegramMessageId);
 
   if (error) {
-    console.error(`âŒ Gagal update status menjadi "${newStatus}":`, error.message);
+    console.error(`G¥î Gagal update status menjadi "${newStatus}":`, error.message);
     return false;
   }
 
-  console.log(`âœ… Status tiket diubah menjadi "${newStatus}" (telegram_message_id: ${telegramMessageId})`);
+  console.log(`G£à Status tiket diubah menjadi "${newStatus}" (telegram_message_id: ${telegramMessageId})`);
 
   // Jika tiket selesai/dibatalkan, tutup sesi percakapannya di tabel conversation
   if (["Done", "Resolved", "Cancelled"].includes(newStatus)) {
@@ -231,7 +231,7 @@ export async function updateIncidentStatus(telegramMessageId, newStatus) {
         await closeConversationSessionByTicket(ticketId);
       }
     } catch (err) {
-      console.error("âš ï¸ Gagal menutup sesi conversation saat update status:", err.message);
+      console.error("GÜán+Å Gagal menutup sesi conversation saat update status:", err.message);
     }
   }
 
@@ -240,23 +240,24 @@ export async function updateIncidentStatus(telegramMessageId, newStatus) {
 
 export async function getTicketById(ticketId) {
   if (!ticketId) {
-    console.warn("âš ï¸ ticketId kosong");
+    console.warn("GÜán+Å ticketId kosong");
     return null;
   }
 
+  console.log(`=ƒöì [DEBUG] getTicketById called with: "${ticketId}", length: ${ticketId.length}`);
   const { data, error } = await supabase
     .from('Unified_Ticket_Tracker')
     .select('*')
-    .eq('ticket_id', ticketId)
+    .eq('ticket_id', ticketId.trim())
     .single();   // .single() karena hanya 1 record
 
   if (error) {
     if (error.code === 'PGRST116') {
-      console.warn(`âš ï¸ Ticket dengan ID ${ticketId} tidak ditemukan`);
+      console.warn(`GÜán+Å Ticket dengan ID ${ticketId} tidak ditemukan`);
       return null;
     }
-    console.error(`âŒ Gagal mengambil ticket ${ticketId}:`, error.message);
-    return null;
+    console.error(`G¥î Gagal mengambil ticket ${ticketId}:`, error);
+    throw new Error(`Database error: ${error.message || error.code || 'Unknown error'}`);
   }
 
   return data;
@@ -267,7 +268,7 @@ export async function getTicketById(ticketId) {
  */
 export async function updateTicket(ticketId, updateData) {
   if (!ticketId || !updateData || Object.keys(updateData).length === 0) {
-    console.warn("âš ï¸ Data update tidak valid");
+    console.warn("GÜán+Å Data update tidak valid");
     return false;
   }
 
@@ -288,11 +289,11 @@ export async function updateTicket(ticketId, updateData) {
     .eq('ticket_id', ticketId);
 
   if (error) {
-    console.error(`âŒ Gagal update ticket ${ticketId}:`, error.message);
+    console.error(`G¥î Gagal update ticket ${ticketId}:`, error.message);
     return false;
   }
 
-  console.log(`âœ… Ticket ${ticketId} berhasil diupdate`);
+  console.log(`G£à Ticket ${ticketId} berhasil diupdate`);
   return true;
 }
 
@@ -302,7 +303,7 @@ export async function updateTicket(ticketId, updateData) {
  */
 export async function deleteTicket(ticketId) {
   if (!ticketId) {
-    console.warn("âš ï¸ ticketId kosong");
+    console.warn("GÜán+Å ticketId kosong");
     return false;
   }
 
@@ -312,11 +313,11 @@ export async function deleteTicket(ticketId) {
     .eq('ticket_id', ticketId);
 
   if (error) {
-    console.error(`âŒ Gagal menghapus ticket ${ticketId}:`, error.message);
+    console.error(`G¥î Gagal menghapus ticket ${ticketId}:`, error.message);
     return false;
   }
 
-  console.log(`ğŸ—‘ï¸ Ticket ${ticketId} berhasil dihapus`);
+  console.log(`=ƒùæn+Å Ticket ${ticketId} berhasil dihapus`);
   return true;
 }
 
@@ -335,7 +336,7 @@ export async function getTicketsByStatus(status = null) {
   const { data, error } = await query;
 
   if (error) {
-    console.error("âŒ Gagal mengambil tiket berdasarkan status:", error.message);
+    console.error("G¥î Gagal mengambil tiket berdasarkan status:", error.message);
     return [];
   }
 
@@ -353,7 +354,7 @@ export async function getTicketsByDateRange(days = 7) {
     .order('processed_at', { ascending: false });
 
   if (error) {
-    console.error(`âŒ Gagal mengambil tiket ${days} hari terakhir:`, error.message);
+    console.error(`G¥î Gagal mengambil tiket ${days} hari terakhir:`, error.message);
     return [];
   }
 
@@ -382,13 +383,13 @@ export async function getTicketsByDate(dateStr, limit = 15) {
       .limit(limit);
 
     if (error) {
-      console.error(`âŒ Gagal mengambil tiket tanggal ${dateStr}:`, error.message);
+      console.error(`G¥î Gagal mengambil tiket tanggal ${dateStr}:`, error.message);
       return [];
     }
 
     return data || [];
   } catch (err) {
-    console.error('âŒ Unexpected error in getTicketsByDate:', err.message);
+    console.error('G¥î Unexpected error in getTicketsByDate:', err.message);
     return [];
   }
 }
@@ -406,8 +407,8 @@ export async function searchTickets(keyword) {
     .limit(30);
 
   if (error) {
-    console.error("âŒ Gagal mencari tiket:", error.message);
-    return [];
+    console.error("G¥î Gagal mencari tiket:", error);
+    throw new Error(`Database error: ${error.message || error.code || 'Unknown error'}`);
   }
 
   return data || [];
@@ -442,13 +443,13 @@ export async function findActiveTicketsForGroup(groupId, source) {
       .limit(5);
 
     if (error) {
-      console.error(`âŒ Error mencari tiket aktif grup (${groupId}):`, error.message);
+      console.error(`G¥î Error mencari tiket aktif grup (${groupId}):`, error.message);
       return [];
     }
 
     return data || [];
   } catch (err) {
-    console.error("âŒ Unexpected error in findActiveTicketsForGroup:", err);
+    console.error("G¥î Unexpected error in findActiveTicketsForGroup:", err);
     return [];
   }
 }
@@ -475,7 +476,7 @@ export async function findActiveTicketForThreading(remoteJid, groupSubject, quot
       if (data && data.length > 0) {
         const ticket = data[0];
         if (["Done", "Resolved", "Cancelled"].includes(ticket.status)) {
-          console.log(`âš ï¸ Tiket induk ${ticket.ticket_id} ditemukan via quote tetapi statusnya adalah ${ticket.status} (CLOSED). Skip threading.`);
+          console.log(`GÜán+Å Tiket induk ${ticket.ticket_id} ditemukan via quote tetapi statusnya adalah ${ticket.status} (CLOSED). Skip threading.`);
         } else {
           console.log("Ditemukan tiket induk berdasarkan quote: " + ticket.ticket_id);
           return ticket;
@@ -517,7 +518,7 @@ export async function findActiveTicketForThreading(remoteJid, groupSubject, quot
       if (ticketData && ticketData.length > 0) {
         const ticket = ticketData[0];
         if (["Done", "Resolved", "Cancelled"].includes(ticket.status)) {
-          console.log(`âš ï¸ Sesi OPEN tapi tiket ${ticket.ticket_id} sudah ${ticket.status} (CLOSED). Skip threading.`);
+          console.log(`GÜán+Å Sesi OPEN tapi tiket ${ticket.ticket_id} sudah ${ticket.status} (CLOSED). Skip threading.`);
         } else {
           return ticket;
         }
@@ -543,7 +544,7 @@ export async function appendMessageToTicket(ticketId, currentBody, senderName, t
       timeZone: "Asia/Jakarta"
     });
 
-    const formattedAppend = `\n\nğŸ’¬ [${timestamp} - ${senderName}]: ${text}`;
+    const formattedAppend = `\n\n=ƒÆ¼ [${timestamp} - ${senderName}]: ${text}`;
     const newBody = (currentBody || "") + formattedAppend;
 
     const { error } = await supabase
@@ -691,11 +692,11 @@ export async function saveRawEmail(email) {
       .single();
 
     if (error) {
-      console.error("âŒ Gagal simpan email:", error.message);
+      console.error("G¥î Gagal simpan email:", error.message);
       return null;
     }
 
-    console.log("âœ… Email berhasil masuk intake_message:", data.id);
+    console.log("G£à Email berhasil masuk intake_message:", data.id);
 
     return data;
 
@@ -708,7 +709,7 @@ export async function saveRawEmail(email) {
 // ====================== SAVE RAW INTAKE MESSAGE ======================
 /**
  * Menyimpan pesan mentah (raw) dari channel apapun ke tabel intake_message.
- * Dipanggil SEBELUM proses AI apapun â€” setiap pesan masuk selalu disimpan dulu.
+ * Dipanggil SEBELUM proses AI apapun GÇö setiap pesan masuk selalu disimpan dulu.
  *
  * Skema kolom tabel intake_message:
  * @param {Object}      data
@@ -752,18 +753,18 @@ export async function saveRawIntakeMessage(data) {
     if (error) {
       // Jika error karena idempotency_key duplikat, skip dengan log warning
       if (error.code === '23505') {
-        console.warn(`âš ï¸  Pesan duplikat (idempotency_key: ${payload.idempotency_key}) â€” dilewati`);
+        console.warn(`GÜán+Å  Pesan duplikat (idempotency_key: ${payload.idempotency_key}) GÇö dilewati`);
         return null;
       }
-      console.error('âŒ Gagal menyimpan raw intake message ke intake_message:', error.message);
+      console.error('G¥î Gagal menyimpan raw intake message ke intake_message:', error.message);
       return null;
     }
 
-    console.log(`   ğŸ’¾ Raw message tersimpan ke intake_message (id: ${inserted?.id})`);
+    console.log(`   =ƒÆ+ Raw message tersimpan ke intake_message (id: ${inserted?.id})`);
     return inserted;
 
   } catch (err) {
-    console.error('âŒ Unexpected error in saveRawIntakeMessage:', err.message);
+    console.error('G¥î Unexpected error in saveRawIntakeMessage:', err.message);
     return null;
   }
 }
@@ -785,7 +786,7 @@ export async function getRawIntakeMessageById(rawId) {
 
     if (error) {
       console.error(
-        `âŒ Gagal mengambil intake_message dengan ID ${rawId}:`,
+        `G¥î Gagal mengambil intake_message dengan ID ${rawId}:`,
         error.message
       );
       return null;
@@ -794,7 +795,7 @@ export async function getRawIntakeMessageById(rawId) {
     return data;
   } catch (err) {
     console.error(
-      `âŒ Unexpected error saat mengambil intake_message ID ${rawId}:`,
+      `G¥î Unexpected error saat mengambil intake_message ID ${rawId}:`,
       err.message
     );
     return null;
@@ -824,14 +825,14 @@ export async function markRawMessageAs(rawId, status, ticketId = null, ignoreRea
       .eq('id', rawId);
 
     if (error) {
-      console.error(`âŒ Gagal markRawMessageAs (id: ${rawId}, status: ${status}):`, error.message);
+      console.error(`G¥î Gagal markRawMessageAs (id: ${rawId}, status: ${status}):`, error.message);
       return false;
     }
 
-    console.log(`   ğŸ“Œ intake_message[${rawId}] â†’ status: ${status}${ticketId ? `, ticket: ${ticketId}` : ''}`);
+    console.log(`   =ƒôî intake_message[${rawId}] GåÆ status: ${status}${ticketId ? `, ticket: ${ticketId}` : ''}`);
     return true;
   } catch (err) {
-    console.error('âŒ Unexpected error in markRawMessageAs:', err.message);
+    console.error('G¥î Unexpected error in markRawMessageAs:', err.message);
     return false;
   }
 }
@@ -863,14 +864,14 @@ export async function findActiveTicketsByGroupId(groupId, source = null) {
     const { data, error } = await query;
 
     if (error) {
-      console.error(`âŒ Error findActiveTicketsByGroupId (group: ${groupId}):`, error.message);
+      console.error(`G¥î Error findActiveTicketsByGroupId (group: ${groupId}):`, error.message);
       return [];
     }
 
-    console.log(`ğŸ” Tiket aktif ditemukan di grup [${groupId}]: ${data?.length || 0} tiket`);
+    console.log(`=ƒöì Tiket aktif ditemukan di grup [${groupId}]: ${data?.length || 0} tiket`);
     return data || [];
   } catch (err) {
-    console.error('âŒ Unexpected error in findActiveTicketsByGroupId:', err.message);
+    console.error('G¥î Unexpected error in findActiveTicketsByGroupId:', err.message);
     return [];
   }
 }
@@ -893,13 +894,13 @@ export async function getPendingRawMessages(limit = 50) {
       .limit(limit);
 
     if (error) {
-      console.error('âŒ Gagal mengambil pending raw messages:', error.message);
+      console.error('G¥î Gagal mengambil pending raw messages:', error.message);
       return [];
     }
 
     return data || [];
   } catch (err) {
-    console.error('âŒ Unexpected error in getPendingRawMessages:', err.message);
+    console.error('G¥î Unexpected error in getPendingRawMessages:', err.message);
     return [];
   }
 }
@@ -926,7 +927,7 @@ export async function markSlaFlag(ticketId, level) {
   return !error;
 }
 
-// â”€â”€ SLA KONFIRMASI: Ambil tiket Pending Confirmation yang intake_received_at sudah ada
+// GöÇGöÇ SLA KONFIRMASI: Ambil tiket Pending Confirmation yang intake_received_at sudah ada
 // Digunakan oleh slaWorker checkSlaConfirmation() untuk Looping 1 (15 Menit)
 export async function getTicketsNeedingConfirmationCheck() {
   const { data, error } = await supabase
