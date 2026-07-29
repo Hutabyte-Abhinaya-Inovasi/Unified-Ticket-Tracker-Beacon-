@@ -2,6 +2,7 @@
 
 import TelegramBot from 'node-telegram-bot-api';
 import { env } from '../../config/env.js';
+import { formatCandidateTicket } from './telegramFormatter.js';
 import {
   supabase,
   saveEmailLog,
@@ -1496,27 +1497,7 @@ async function handleRejectCancel(query, chatId, intakeId) {
     const raw = await getRawIntakeMessageById(intakeId);
     if (!raw) return;
 
-    const receivedTime = raw.received_at
-      ? new Date(raw.received_at).toLocaleString("id-ID", { timeZone: "Asia/Jakarta", day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })
-      : "-";
-
-    const shortText = `📥 <b>KANDIDAT TIKET BARU</b>\n` +
-      `━━━━━━━━━━━━━━━━━━━━━\n` +
-      `🆔 Intake ID   : <code>${escapeHTML(String(intakeId))}</code>\n` +
-      `📅 Diterima    : ${escapeHTML(receivedTime)}\n` +
-      `━━━━━━━━━━━━━━━━━━━━━\n` +
-      `📡 Channel     : ${escapeHTML(raw.source_channel || "Email")}\n` +
-      `👤 Dari        : ${escapeHTML(raw.sender || "-")}\n` +
-      `📌 Subject     : ${escapeHTML(raw.raw_payload?.group_name || raw.raw_payload?.subject || "(No Subject)")}\n` +
-      `━━━━━━━━━━━━━━━━━━━━━\n` +
-      `🗂 Kategori    : Belum diisi\n` +
-      `⚠️ Severity    : Belum diisi\n` +
-      `📋 Status      : Menunggu Konfirmasi (SLA: 15 Menit)\n` +
-      `━━━━━━━━━━━━━━━━━━━━━\n` +
-      `🗒 Ringkasan: -\n\n` +
-      `💬 <b>Pesan Asli:</b>\n` +
-      `${escapeHTML(String(raw.body_text || "-").substring(0, 1500))}\n\n` +
-      `<i>Apakah pesan ini merupakan tiket?</i>`;
+    const shortText = formatCandidateTicket(raw);
 
     const keyboard = {
       inline_keyboard: [
@@ -1702,12 +1683,6 @@ async function handleBeaconEditTicket(query, chatId, ticketId) {
   const userId = query.from?.id?.toString() || 'unknown';
 
   try {
-    // Hapus keyboard dari pesan Beacon
-    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
-      chat_id: chatId,
-      message_id: query.message.message_id
-    }).catch(() => { });
-
     // Ambil tiket dari DB
     const ticket = await getTicketById(ticketId);
     if (!ticket) {
@@ -1725,11 +1700,17 @@ async function handleBeaconEditTicket(query, chatId, ticketId) {
       ...keyboard
     });
 
+    // Hapus keyboard dari pesan Beacon hanya jika pengiriman pesan sesi edit berhasil
+    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+      chat_id: chatId,
+      message_id: query.message.message_id
+    }).catch(() => { });
+
     await bot.answerCallbackQuery(query.id, { text: `Sesi edit tiket ${ticketId} dibuka.`, show_alert: false });
     console.log(`[BeaconEdit] Tiket ${ticketId} dibuka untuk edit oleh ${senderName}`);
   } catch (err) {
     console.error('handleBeaconEditTicket error:', err.message);
-    await bot.answerCallbackQuery(query.id, { text: 'Terjadi kesalahan. Coba lagi.', show_alert: true });
+    await bot.answerCallbackQuery(query.id, { text: `❌ Terjadi kesalahan: ${err.message}`, show_alert: true });
   }
 }
 
@@ -2020,6 +2001,11 @@ async function handleRepairEditCallback(query, chatId, userId, data) {
       message_id: query.message.message_id
     }).catch(() => { });
 
+    const isGroup = String(chatId).startsWith('-');
+    const groupInstruction = isGroup
+      ? `\n\n💡 <i><b>Petunjuk Grup:</b> Silakan <b>Balas (Reply)</b> pesan ini dengan teks pembaruan Anda.</i>`
+      : ``;
+
     await bot.sendMessage(chatId,
       `🤖 <b>Edit Tiket via AI (Quick Update)</b>\n\n` +
       `Kirimkan atau tempelkan (paste) pesan pembaruan tiket dalam format bebas!\n` +
@@ -2028,9 +2014,10 @@ async function handleRepairEditCallback(query, chatId, userId, data) {
       `• <code>[EPC Tools] EMERGENCY|Update Facts Lookup Price Zone</code>\n` +
       `• <code>[EPC] Checking Service Identity 2 | 20260728 | 15:55 | 15:57</code>\n` +
       `• <code>[2389] [EPC Tools] [EMERGENCY] [Update Facts Lookup Price Zone]</code>\n\n` +
-      `Ketik atau paste pesan pembaruan sekarang 👇`,
+      `Ketik atau paste pesan pembaruan sekarang 👇${groupInstruction}`,
       {
         parse_mode: 'HTML',
+        reply_to_message_id: query.message.message_id,
         reply_markup: {
           inline_keyboard: [
             [{ text: '❌ Batalkan', callback_data: 'rq_cancel' }]
@@ -2058,11 +2045,20 @@ async function handleRepairEditCallback(query, chatId, userId, data) {
   // Ambil prompt + opsi keyboard (gunakan prefix rq_ untuk repair)
   const { question, keyboard } = getFieldPrompt(field, true, 'rq');
 
+  const isGroup = String(chatId).startsWith('-');
+  const groupInstruction = isGroup
+    ? `\n\n💡 <i><b>Petunjuk Grup:</b> Silakan <b>Balas (Reply)</b> pesan ini dengan teks baru Anda atau pilih tombol di bawah.</i>`
+    : ``;
+
   await bot.sendMessage(chatId,
     `✏️ <b>Edit: ${escapeHTML(fieldLabel)}</b>\n` +
     `${currentVal ? `Nilai sekarang: <i>${escapeHTML(String(currentVal))}</i>\n\n` : '\n'}` +
-    question,
-    { parse_mode: 'HTML', ...keyboard }
+    question + groupInstruction,
+    {
+      parse_mode: 'HTML',
+      reply_to_message_id: query.message.message_id,
+      ...keyboard
+    }
   );
 }
 
@@ -2217,34 +2213,7 @@ async function handleRepairPublish(query, chatId, userId, ticketId) {
 
 // ================== HELPER: FORMAT PESAN KANDIDAT TIKET (untuk Beacon) ==================
 function formatCandidateTicketMessage(ticket) {
-  const intakeId = ticket.ticket_id || ticket.id || '-';
-  const sourceLabel = ticket.source || 'System';
-  const sourceName = ticket.group_name || ticket.subject || '(No Subject)';
-  const sender = ticket.from || '-';
-  const receivedTime = ticket.processed_at ? new Date(ticket.processed_at).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '-';
-  const categoryVal = ticket.category || 'Belum diisi';
-  const severityVal = ticket.severity || ticket.priority || 'Belum diisi';
-  const summaryVal = ticket.summary || '-';
-
-  return (
-    `📥 <b>KANDIDAT TIKET BARU</b>\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🆔 Intake ID   : <code>${escapeHTML(String(intakeId))}</code>\n` +
-    `📅 Diterima    : ${escapeHTML(receivedTime)}\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `📡 Channel     : ${escapeHTML(sourceLabel)}\n` +
-    `👤 Dari        : ${escapeHTML(sender)}\n` +
-    `📌 Subject     : ${escapeHTML(sourceName)}\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🗂 Kategori    : ${escapeHTML(categoryVal)}\n` +
-    `⚠️ Severity    : ${escapeHTML(severityVal)}\n` +
-    `📋 Status      : Menunggu Konfirmasi (SLA: 15 Menit)\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🗒 Ringkasan: ${escapeHTML(summaryVal)}\n\n` +
-    `💬 <b>Pesan Asli:</b>\n` +
-    `${escapeHTML(String(ticket.body || '-').substring(0, 1500))}\n\n` +
-    `<i>Apakah pesan ini merupakan tiket?</i>`
-  );
+  return formatCandidateTicket(ticket);
 }
 
 // ================== HELPER: FORMAT PESAN TIKET DIKONFIRMASI (setelah ✅) ==================
@@ -2543,90 +2512,8 @@ export async function sendRawIntakeCandidate(raw) {
     env.TG_UTT_CHAT_ID || env.TG_CHAT_ID
   ).trim();
 
-  let original = raw.raw_payload || {};
-
-  // Antisipasi raw_payload tersimpan sebagai JSON string
-  if (typeof original === "string") {
-    try {
-      original = JSON.parse(original);
-    } catch {
-      original = {};
-    }
-  }
-
   const intakeId = raw.id;
-
-  const sourceChannel =
-    raw.source_channel ||
-    raw.source ||
-    "unknown";
-
-  const sourceLabels = {
-    whatsapp: "WhatsApp",
-    wa_group: "WhatsApp Group",
-    telegram: "Telegram",
-    telegram_dm: "Telegram Direct Message",
-    telegram_group: "Telegram Group",
-    outlook: "Microsoft 365 Outlook",
-    email: "Email",
-  };
-
-  const sourceLabel =
-    sourceLabels[sourceChannel] ||
-    sourceChannel;
-
-  const sender =
-    original.push_name ||
-    original.sender_name ||
-    original.from ||
-    raw.sender ||
-    "-";
-
-  const sourceName =
-    original.group_name ||
-    original.subject ||
-    raw.group_name ||
-    (sourceChannel.includes("telegram")
-      ? "Direct Message"
-      : "(No Subject)");
-
-  const body =
-    original.body ||
-    original.text ||
-    raw.body_text ||
-    raw.body ||
-    "-";
-
-  const receivedTime = raw.received_at
-    ? new Date(raw.received_at).toLocaleString("id-ID", {
-        timeZone: "Asia/Jakarta",
-        day: "2-digit",
-        month: "short",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false,
-      })
-    : "-";
-
-  const messageText =
-    `📥 <b>KANDIDAT TIKET BARU</b>\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🆔 Intake ID   : <code>${escapeHTML(String(intakeId))}</code>\n` +
-    `📅 Diterima    : ${escapeHTML(receivedTime)}\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `📡 Channel     : ${escapeHTML(sourceLabel)}\n` +
-    `👤 Dari        : ${escapeHTML(sender)}\n` +
-    `📌 Subject     : ${escapeHTML(sourceName)}\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🗂 Kategori    : Belum diisi\n` +
-    `⚠️ Severity    : Belum diisi\n` +
-    `📋 Status      : Menunggu Konfirmasi (SLA: 15 Menit)\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🗒 Ringkasan: -\n\n` +
-    `💬 <b>Pesan Asli:</b>\n` +
-    `${escapeHTML(String(body).substring(0, 1500))}\n\n` +
-    `<i>Apakah pesan ini merupakan tiket?</i>`;
+  const messageText = formatCandidateTicket(raw);
 
   const keyboard = {
     reply_markup: {

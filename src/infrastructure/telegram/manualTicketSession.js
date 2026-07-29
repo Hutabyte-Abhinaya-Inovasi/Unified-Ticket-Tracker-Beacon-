@@ -438,6 +438,13 @@ export function getFieldPrompt(field, canSkip = false, prefix = 'fq') {
   return { question, keyboard };
 }
 
+export function escapeHTML(text = "") {
+  return String(text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 // ====================== SUMMARY FORMATTER ======================
 
 /**
@@ -463,21 +470,18 @@ export function formatSessionSummary(session) {
     'walk-in': '🚶 Walk-in', telegram: '✈️ Telegram', lainnya: '❓ Lainnya'
   };
 
-  const text = `📋 <b>Ringkasan Tiket — Mohon periksa kembali</b>
-
-📌 Kategori    : ${categoryShort}
-${severityEmoji} Severity     : ${d.severity || '-'}
-🖥 Project     : ${d.project || '<i>tidak disebutkan</i>'}
-👤 Pelapor     : ${d.requester || '<i>tidak disebutkan</i>'}
-📞 Sumber      : ${sourceMap[d.source] || d.source || '<i>tidak disebutkan</i>'}
-⏰ Waktu       : ${d.reported_time || '<i>tidak disebutkan</i>'}
-📌 Issue Type  : ${d.issue_type || '-'}
-
-📝 <b>Deskripsi:</b>
-${d.description || '-'}
-
-━━━━━━━━━━━━━━━━━━━━━
-✏️ Tekan tombol field di bawah untuk mengedit, atau simpan jika sudah benar.`;
+  const text = `📋 <b>Ringkasan Tiket — Mohon periksa kembali</b>\n\n` +
+    `📌 Kategori    : ${escapeHTML(categoryShort)}\n` +
+    `${severityEmoji} Severity     : ${escapeHTML(d.severity || '-')}\n` +
+    `🖥 Project     : ${escapeHTML(d.project || 'tidak disebutkan')}\n` +
+    `👤 Pelapor     : ${escapeHTML(d.requester || 'tidak disebutkan')}\n` +
+    `📞 Sumber      : ${escapeHTML(sourceMap[d.source] || d.source || 'tidak disebutkan')}\n` +
+    `⏰ Waktu       : ${escapeHTML(d.reported_time || 'tidak disebutkan')}\n` +
+    `📌 Issue Type  : ${escapeHTML(d.issue_type || '-')}\n\n` +
+    `📝 <b>Deskripsi:</b>\n` +
+    `${escapeHTML(d.description || '-')}\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n` +
+    `✏️ Tekan tombol field di bawah untuk mengedit, atau simpan jika sudah benar.`;
 
   const keyboard = {
     reply_markup: {
@@ -512,8 +516,8 @@ ${d.description || '-'}
  * Mengembalikan { text, keyboard } — keyboard berisi tombol edit per field + re-publish/batal.
  */
 export function formatRepairSummary(session) {
-  const t = session.repairTicket;  // data original dari DB
-  const d = session.repairData;    // data yang sudah diedit (override)
+  const t = session.repairTicket || {};  // data original dari DB
+  const d = session.repairData || {};    // data yang sudah diedit (override)
 
   // Gabungkan: gunakan repairData jika ada, fallback ke repairTicket
   const from          = d.from     !== undefined ? d.from     : t.from;
@@ -537,29 +541,24 @@ export function formatRepairSummary(session) {
     ? new Date(t.processed_at).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', dateStyle: 'medium', timeStyle: 'short' })
     : '-';
 
-  const text = `🔧 <b>Repair Tiket — Periksa & Edit Sebelum Re-Publish</b>
+  const text = `🔧 <b>Repair Tiket — Periksa & Edit Sebelum Re-Publish</b>\n\n` +
+    `🎫 <b>Ticket ID</b>  : <code>${escapeHTML(t.ticket_id || '-')}</code>\n` +
+    `📅 <b>Dibuat</b>     : ${escapeHTML(createdAt)} <i>(tidak berubah)</i>\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n` +
+    `👤 <b>Dari</b>       : ${escapeHTML(from || '-')}\n` +
+    `📌 <b>Subject</b>    : ${escapeHTML(subject || '-')}\n` +
+    `🗂 <b>Kategori</b>   : ${escapeHTML(category || '-')}\n` +
+    `${priorityEmoji} <b>Priority</b>   : ${escapeHTML(priority || '-')}\n` +
+    `📞 <b>Sumber</b>     : ${escapeHTML(sourceMap[source] || source || '-')}\n` +
+    `🔄 <b>Status</b>     : ${escapeHTML(status || '-')}\n\n` +
+    `🗒 <b>Summary:</b>\n` +
+    `${summary ? escapeHTML(summary) : '<i>-</i>'}\n\n` +
+    `📝 <b>Body / Isi Tiket:</b>\n` +
+    `${body ? escapeHTML(String(body).substring(0, 300) + (String(body).length > 300 ? '...' : '')) : '<i>-</i>'}\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n` +
+    `✏️ Edit field yang perlu diubah, lalu tekan <b>Re-Publish Update ke Beacon</b>.`;
 
-🎫 <b>Ticket ID</b>  : <code>${t.ticket_id}</code>
-📅 <b>Dibuat</b>     : ${createdAt} <i>(tidak berubah)</i>
-
-━━━━━━━━━━━━━━━━━━━━━
-👤 <b>Dari</b>       : ${from || '-'}
-📌 <b>Subject</b>    : ${subject || '-'}
-🗂 <b>Kategori</b>   : ${category || '-'}
-${priorityEmoji} <b>Priority</b>   : ${priority || '-'}
-📞 <b>Sumber</b>     : ${sourceMap[source] || source || '-'}
-🔄 <b>Status</b>     : ${status || '-'}
-
-🗒 <b>Summary:</b>
-${summary || '<i>-</i>'}
-
-📝 <b>Body / Isi Tiket:</b>
-${body ? body.substring(0, 300) + (body.length > 300 ? '...' : '') : '<i>-</i>'}
-
-━━━━━━━━━━━━━━━━━━━━━
-✏️ Edit field yang perlu diubah, lalu tekan <b>Re-Publish Update</b>.`;
-
-  const ticketId = t.ticket_id;
+  const ticketId = t.ticket_id || '-';
 
   const keyboard = {
     reply_markup: {
@@ -619,26 +618,22 @@ export function formatDraftForUTT(session, ticketId) {
   const waktu = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta' });
   const tanggal = now.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
 
-  const text = `📝 <b>TIKET DRAFT — Menunggu Konfirmasi</b>
-
-🎫 <b>Ticket ID</b>  : <code>${ticketId}</code>
-📅 <b>Waktu Input</b>: ${tanggal}, ${waktu} WIB
-👤 <b>Diinput oleh</b>: ${session.senderName}
-
-━━━━━━━━━━━━━━━━━━━━━
-${severityEmoji} <b>Severity</b>   : ${d.severity || '-'}
-🗂 <b>Kategori</b>   : ${d.category || '-'}
-🖥 <b>Project</b>    : ${d.project || '-'}
-👤 <b>Pelapor</b>    : ${d.requester || '-'}
-📞 <b>Sumber</b>     : ${sourceMap[d.source] || d.source || '-'}
-⏰ <b>Waktu Kejadian</b>: ${d.reported_time || '-'}
-📌 <b>Issue Type</b> : ${d.issue_type || '-'}
-
-📝 <b>Deskripsi:</b>
-${d.description || '-'}
-
-━━━━━━━━━━━━━━━━━━━━━
-⚠️ <i>Apakah tiket ini sudah benar? Konfirmasi sebelum dipublish ke Beacon.</i>`;
+  const text = `📝 <b>TIKET DRAFT — Menunggu Konfirmasi</b>\n\n` +
+    `🎫 <b>Ticket ID</b>  : <code>${escapeHTML(ticketId)}</code>\n` +
+    `📅 <b>Waktu Input</b>: ${escapeHTML(tanggal)}, ${escapeHTML(waktu)} WIB\n` +
+    `👤 <b>Diinput oleh</b>: ${escapeHTML(session.senderName)}\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n` +
+    `${severityEmoji} <b>Severity</b>   : ${escapeHTML(d.severity || '-')}\n` +
+    `🗂 <b>Kategori</b>   : ${escapeHTML(d.category || '-')}\n` +
+    `🖥 <b>Project</b>    : ${escapeHTML(d.project || '-')}\n` +
+    `👤 <b>Pelapor</b>    : ${escapeHTML(d.requester || '-')}\n` +
+    `📞 <b>Sumber</b>     : ${escapeHTML(sourceMap[d.source] || d.source || '-')}\n` +
+    `⏰ <b>Waktu Kejadian</b>: ${escapeHTML(d.reported_time || '-')}\n` +
+    `📌 <b>Issue Type</b> : ${escapeHTML(d.issue_type || '-')}\n\n` +
+    `📝 <b>Deskripsi:</b>\n` +
+    `${escapeHTML(d.description || '-')}\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n` +
+    `⚠️ <i>Apakah tiket ini sudah benar? Konfirmasi sebelum dipublish ke Beacon.</i>`;
 
   const keyboard = {
     reply_markup: {
