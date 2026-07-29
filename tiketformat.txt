@@ -1,11 +1,11 @@
 📥 NEW TICKET CANDIDATE
 ━━━━━━━━━━━━━━━━━━━━━
-🆔 Intake ID   : 6935
-🕒 Received At : 28 Jul 2026, 10:04 WIB
+🆔 Intake ID   : [ID-INTAKE] 
+🕒 Received At : [TIMESTAMP-DATE] 
 📧 Channel     : Email
-👤 Sender      : Grace Kristiani
-📨 Email       : gracekristianiii@gmail.com
-🏷️ Subject     : TESTING UTT
+👤 Sender      : [SENDER-NAME] 
+📨 Email       : [EMAIL-ADDRESS] 
+🏷️ Subject     : [SUBJECT] 
 ━━━━━━━━━━━━━━━━━━━━━
 📋 TICKET DETAILS
 
