@@ -53,6 +53,9 @@ import {
   DB_FIELD_LABELS,
   FIELD_QUESTIONS
 } from './manualTicketSession.js';
+import {
+    sendAcknowledgement
+} from "../acknowledgement/acknowledgementService.js";
 
 let bot = null;
 
@@ -1342,6 +1345,7 @@ async function handleProcessIntake(query, chatId, intakeId) {
     // Tandai bahwa ini dikonfirmasi manual oleh operator, sehingga tiket langsung In Progress
     // skip_telegram_edit: true agar tidak diedit menjadi format panjang oleh sendIncidentAlert
     const result = await processRawMessage({ ...raw, is_confirmed: true, skip_telegram_edit: true, messageIdToEdit: query.message.message_id });
+    await sendAcknowledgement(raw,result.ticketId);
 
     // Format teks pendek agar tidak bertumpuk
     const shortText = `✅ <b>TIKET DIKONFIRMASI</b>\n━━━━━━━━━━━━━━━━━━━━━\n` +
