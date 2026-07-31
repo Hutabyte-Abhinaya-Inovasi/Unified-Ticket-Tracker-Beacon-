@@ -1,0 +1,27 @@
+📥 NEW TICKET CANDIDATE
+━━━━━━━━━━━━━━━━━━━━━
+🆔 Intake ID   : [ID-INTAKE] 
+🕒 Received At : [TIMESTAMP-DATE] 
+📧 Channel     : Email
+👤 Sender      : [SENDER-NAME] 
+📨 Email       : [EMAIL-ADDRESS] 
+🏷️ Subject     : [SUBJECT] 
+━━━━━━━━━━━━━━━━━━━━━
+📋 TICKET DETAILS
+
+🖥️ Project     : Unified Network Mediation
+🗂️ Category    : Pending Operator Confirmation
+⚠️ Severity    : Pending Operator Confirmation
+🔄 Status      : Pending Confirmation
+⏳ Confirmation Deadline : 15 minutes
+━━━━━━━━━━━━━━━━━━━━━
+📝 SUMMARY
+
+Not available yet.
+
+💬 ORIGINAL MESSAGE
+
+Good afternoon, please help with ..........
+
+━━━━━━━━━━━━━━━━━━━━━
+❓ Should this message be processed as a ticket?
