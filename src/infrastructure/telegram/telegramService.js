@@ -22,6 +22,7 @@ import {
   appendMessageToTicket,
   createConversationSession,
   updateConversationLastMessage,
+  getTicketByReference,
   closeConversationSessionByTicket
 } from '../../database/supabase.js';
 import { processRawMessage } from '../../usecases/processRawMessage.js';
@@ -31,6 +32,7 @@ import {
   checkMessageRelevance,
   routeMessageToActiveTickets,
   detectStatusChangeFromReply,
+  generateTicketSummary,
   extractTicketFields
 } from '../ai/openaiService.js';
 import {
@@ -54,6 +56,600 @@ import {
 } from './manualTicketSession.js';
 
 let bot = null;
+
+// ================== AI QUICK TICKET UPDATE ==================
+
+const QUICK_UPDATE_PROJECTS = new Map([
+  ["SM", "Single Mediation"],
+  ["SINGLEMEDIATION", "Single Mediation"],
+
+  ["MB", "Message Broker"],
+  ["MESSAGEBROKER", "Message Broker"],
+
+  ["APH", "APH Mediation"],
+  ["APHMEDIATION", "APH Mediation"],
+
+  ["UNM", "Unified Network Mediation"],
+  ["UNIFIEDNETWORKMEDIATION", "Unified Network Mediation"],
+
+  ["SIEM", "Umbrella SIEM"],
+  ["USIEM", "Umbrella SIEM"],
+  ["UMBRELLASIEM", "Umbrella SIEM"],
+
+  ["EPC", "Enterprise Product Catalog"],
+  ["EPCTOOLS", "Enterprise Product Catalog"],
+  ["ENTERPRISEPRODUCTCATALOG", "Enterprise Product Catalog"],
+
+  ["B2B", "B2B Service Surveillance"],
+  ["B2BSS", "B2B Service Surveillance"],
+  ["B2BSERVICESURVEILLANCE", "B2B Service Surveillance"],
+
+  ["DM", "Device Management"],
+  ["DEVICEMANAGEMENT", "Device Management"],
+
+  ["CDR", "CDR & LUADR"],
+  ["LUADR", "CDR & LUADR"],
+  ["CDRLUADR", "CDR & LUADR"],
+
+  ["OTHER", "Others"],
+  ["OTHERS", "Others"],
+]);
+
+const QUICK_UPDATE_SEVERITIES = new Map([
+  ["EMERGENCY", "emergency"],
+  ["CRITICAL", "emergency"],
+  ["DARURAT", "emergency"],
+  ["KRITIS", "emergency"],
+
+  ["HIGH", "high"],
+  ["TINGGI", "high"],
+
+  ["MEDIUM", "medium"],
+  ["SEDANG", "medium"],
+
+  ["LOW", "low"],
+  ["RENDAH", "low"],
+
+  ["OTHER", "others"],
+  ["OTHERS", "others"],
+  ["LAINNYA", "others"],
+]);
+
+const QUICK_UPDATE_CATEGORIES = new Map([
+  ["CHANGEMANAGEMENT", "Change Management"],
+  ["INCIDENTMANAGEMENT", "Incident Management"],
+  ["KNOWLEDGEMANAGEMENT", "Knowledge Management"],
+  ["PROBLEMMANAGEMENT", "Problem Management"],
+  ["RELATIONSHIPMANAGEMENT", "Relationship Management"],
+  ["SERVICEREQUESTMANAGEMENT", "Service Request Management"],
+]);
+
+const SEVERITY_TO_PRIORITY = {
+  emergency: "CRITICAL",
+  high: "HIGH",
+  medium: "MEDIUM",
+  low: "LOW",
+  others: "OTHERS",
+};
+
+function normalizeQuickUpdateToken(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+}
+
+function severityToPriority(severity) {
+  const normalizedSeverity = String(severity || "")
+    .trim()
+    .toLowerCase();
+
+  return SEVERITY_TO_PRIORITY[normalizedSeverity] || "MEDIUM";
+}
+
+// ================== PARSE QUICK UPDATE ====================
+function parseAiQuickUpdate(input) {
+  const rawInput =
+    String(input || "").trim();
+
+  /*
+   * Quick Update harus diawali blok referensi tiket.
+   *
+   * Contoh:
+   * [2389]
+   * [TCK-20260729-2389]
+   */
+  if (!/^\s*\[[^\[\]]+\]/.test(rawInput)) {
+    return {
+      isQuickUpdate: false,
+      valid: false,
+      error: null,
+      data: null,
+    };
+  }
+
+  const bracketPattern =
+    /\[([^\[\]]+)\]/g;
+
+  const blocks = Array.from(
+    rawInput.matchAll(bracketPattern)
+  ).map((match) =>
+    match[1].trim()
+  );
+
+  const outsideText = rawInput
+    .replace(bracketPattern, "")
+    .trim();
+
+  if (outsideText) {
+    return {
+      isQuickUpdate: true,
+      valid: false,
+      error:
+        "Semua data Quick Update harus berada di dalam tanda [ ].",
+      data: null,
+    };
+  }
+
+  /*
+   * 4 blok:
+   * Reference, Project, Severity, Body
+   *
+   * 5 blok:
+   * Reference, Project, Severity, Body, Category
+   */
+  if (
+    blocks.length < 4 ||
+    blocks.length > 5
+  ) {
+    return {
+      isQuickUpdate: true,
+      valid: false,
+      error:
+        "Quick Update harus memiliki 4 atau 5 blok.",
+      data: null,
+    };
+  }
+
+  const [
+    rawTicketReference,
+    rawProject,
+    rawSeverity,
+    rawBody,
+    rawCategory,
+  ] = blocks;
+
+  const ticketReference =
+    String(rawTicketReference || "")
+      .trim()
+      .toUpperCase();
+
+  /*
+   * Mendukung:
+   * 2389
+   * TCK-20260729-2389
+   * INC-20260729-2389
+   */
+  if (
+    !ticketReference ||
+    !/^[A-Z0-9-]+$/.test(
+      ticketReference
+    )
+  ) {
+    return {
+      isQuickUpdate: true,
+      valid: false,
+      error:
+        `Referensi tiket "${rawTicketReference}" tidak valid.`,
+      data: null,
+    };
+  }
+
+  const projectKey =
+    normalizeQuickUpdateToken(
+      rawProject
+    );
+
+  const project =
+    QUICK_UPDATE_PROJECTS.get(
+      projectKey
+    );
+
+  if (!project) {
+    return {
+      isQuickUpdate: true,
+      valid: false,
+      error:
+        `Project "${rawProject}" tidak dikenali.`,
+      data: null,
+    };
+  }
+
+  const severityKey =
+    normalizeQuickUpdateToken(
+      rawSeverity
+    );
+
+  const severity =
+    QUICK_UPDATE_SEVERITIES.get(
+      severityKey
+    );
+
+  if (!severity) {
+    return {
+      isQuickUpdate: true,
+      valid: false,
+      error:
+        `Severity "${rawSeverity}" tidak valid. ` +
+        "Gunakan EMERGENCY, HIGH, MEDIUM, LOW, atau OTHERS.",
+      data: null,
+    };
+  }
+
+  /*
+   * Body adalah teks mentah.
+   * Jangan dibuat menjadi summary di parser.
+   */
+  const body =
+    String(rawBody || "").trim();
+
+  if (!body) {
+    return {
+      isQuickUpdate: true,
+      valid: false,
+      error:
+        "Body atau isi tiket tidak boleh kosong.",
+      data: null,
+    };
+  }
+
+  let category = null;
+
+  if (rawCategory) {
+    const categoryKey =
+      normalizeQuickUpdateToken(
+        rawCategory
+      );
+
+    category =
+      QUICK_UPDATE_CATEGORIES.get(
+        categoryKey
+      );
+
+    if (!category) {
+      return {
+        isQuickUpdate: true,
+        valid: false,
+        error:
+          `Category "${rawCategory}" tidak valid.`,
+        data: null,
+      };
+    }
+  }
+
+  return {
+    isQuickUpdate: true,
+    valid: true,
+    error: null,
+
+    data: {
+      ticketReference,
+      project,
+      severity,
+      body,
+      category,
+    },
+  };
+}
+// ================== HANDLE AI QUICK TICKET UPDATE ====================
+async function handleAiQuickTicketUpdate(
+  msg,
+  parsedData
+) {
+  const chatId =
+    msg.chat.id;
+
+  const senderName =
+    msg.from?.first_name ||
+    msg.from?.username ||
+    "Unknown";
+
+  const loadingMessage =
+    await bot.sendMessage(
+      chatId,
+      "⏳ Mencari tiket dan membuat summary...",
+      {
+        reply_to_message_id:
+          msg.message_id,
+      }
+    );
+
+  try {
+    /*
+     * ticketReference dapat berupa:
+     * 2389
+     * TCK-20260729-2389
+     */
+    const ticket =
+      await getTicketByReference(
+        parsedData.ticketReference
+      );
+
+    if (!ticket) {
+      await bot.editMessageText(
+        `❌ Tiket dengan referensi ${parsedData.ticketReference} tidak ditemukan.`,
+        {
+          chat_id: chatId,
+          message_id:
+            loadingMessage.message_id,
+        }
+      );
+
+      return;
+    }
+
+    if (!ticket.ticket_id) {
+      throw new Error(
+        `Record ${parsedData.ticketReference} tidak mempunyai ticket_id.`
+      );
+    }
+
+    /*
+     * Summary dibuat dari body,
+     * body tetap menyimpan teks mentah.
+     */
+    const generatedSummary =
+      await generateTicketSummary(
+        parsedData.body
+      );
+
+    const updatePayload = {
+      project:
+        parsedData.project,
+
+      severity:
+        parsedData.severity,
+
+      priority:
+        severityToPriority(
+          parsedData.severity
+        ),
+
+      body:
+        parsedData.body,
+
+      summary:
+        generatedSummary ||
+        parsedData.body.substring(
+          0,
+          180
+        ),
+    };
+
+    /*
+     * Category opsional.
+     * Jika tidak diberikan, category lama dipertahankan.
+     */
+    if (parsedData.category) {
+      updatePayload.category =
+        parsedData.category;
+    }
+
+    const success =
+      await updateTicket(
+        ticket.ticket_id,
+        updatePayload
+      );
+
+    if (!success) {
+      throw new Error(
+        "Database gagal menyimpan perubahan tiket."
+      );
+    }
+
+    const updatedTicket =
+      await getTicketById(
+        ticket.ticket_id
+      );
+
+    /*
+     * Update pesan Telegram lama apabila tersedia.
+     */
+    if (
+      updatedTicket?.telegram_chat_id &&
+      updatedTicket?.telegram_message_id
+    ) {
+      const targetChatId =
+        String(
+          updatedTicket.telegram_chat_id
+        )
+          .split("|")[0]
+          .trim();
+
+      const targetMessageId =
+        Number(
+          updatedTicket.telegram_message_id
+        );
+
+      if (
+        targetChatId &&
+        Number.isInteger(
+          targetMessageId
+        )
+      ) {
+        const updatedMessage =
+          formatConfirmedTicketMessage(
+            updatedTicket
+          );
+
+        await bot.editMessageText(
+          updatedMessage,
+          {
+            chat_id:
+              targetChatId,
+
+            message_id:
+              targetMessageId,
+
+            parse_mode:
+              "HTML",
+
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: "✅ Done",
+                    callback_data:
+                      `done_ticket_${ticket.ticket_id}`,
+                  },
+                  {
+                    text: "🚫 No Action",
+                    callback_data:
+                      `noaction_ticket_${ticket.ticket_id}`,
+                  },
+                ],
+                [
+                  {
+                    text: "✏️ Edit Tiket",
+                    callback_data:
+                      `edit_beacon_ticket_${ticket.ticket_id}`,
+                  },
+                  {
+                    text: "⬆️ Eskalasi",
+                    callback_data:
+                      `escalate_ticket_${ticket.ticket_id}`,
+                  },
+                ],
+              ],
+            },
+          }
+        ).catch(
+          (telegramError) => {
+            if (
+              !telegramError.message
+                ?.includes(
+                  "message is not modified"
+                )
+            ) {
+              console.warn(
+                "⚠️ Database berhasil diupdate, tetapi pesan Telegram lama gagal diedit:",
+                telegramError.message
+              );
+            }
+          }
+        );
+      }
+    }
+
+    const categoryText =
+      parsedData.category
+        ? parsedData.category
+        : ticket.category ||
+          "Tidak diubah";
+
+    const matchedByText = {
+      internal_id:
+        "Internal ID",
+
+      ticket_id_exact:
+        "Ticket ID lengkap",
+
+      ticket_id_suffix:
+        "Akhiran Ticket ID",
+    }[ticket._matched_by] ||
+      ticket._matched_by ||
+      "-";
+
+    await bot.editMessageText(
+      `✅ <b>TIKET BERHASIL DIPERBARUI</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n` +
+      `🔎 Ditemukan via : <b>${escapeHTML(
+        matchedByText
+      )}</b>\n` +
+      `🆔 Internal ID  : <code>${escapeHTML(
+        String(ticket.id || "-")
+      )}</code>\n` +
+      `🎫 Ticket ID    : <code>${escapeHTML(
+        ticket.ticket_id
+      )}</code>\n` +
+      `🖥 Project      : <b>${escapeHTML(
+        parsedData.project
+      )}</b>\n` +
+      `🚦 Severity     : <b>${escapeHTML(
+        parsedData.severity
+      )}</b>\n` +
+      `🗂 Category     : <b>${escapeHTML(
+        categoryText
+      )}</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n` +
+      `🗒 <b>Summary</b>\n` +
+      `${escapeHTML(
+        updatePayload.summary
+      )}\n\n` +
+      `💬 <b>Body / Isi Tiket</b>\n` +
+      `${escapeHTML(
+        updatePayload.body
+      )}\n\n` +
+      `👤 Diperbarui oleh: ${escapeHTML(
+        senderName
+      )}`,
+      {
+        chat_id:
+          chatId,
+
+        message_id:
+          loadingMessage.message_id,
+
+        parse_mode:
+          "HTML",
+      }
+    );
+
+    console.log(
+      `✅ [AI Quick Update] Tiket ${ticket.ticket_id} diperbarui oleh ${senderName}`,
+      {
+        reference:
+          parsedData.ticketReference,
+
+        matchedBy:
+          ticket._matched_by,
+
+        updatePayload,
+      }
+    );
+  } catch (error) {
+    console.error(
+      "❌ AI Quick Ticket Update gagal:",
+      {
+        message:
+          error?.message,
+
+        cause:
+          error?.cause?.message ||
+          null,
+      }
+    );
+
+    await bot.editMessageText(
+      `❌ Gagal memperbarui tiket.\n\n` +
+      `${escapeHTML(
+        error?.message ||
+        "Terjadi kesalahan tidak diketahui."
+      )}`,
+      {
+        chat_id:
+          chatId,
+
+        message_id:
+          loadingMessage.message_id,
+
+        parse_mode:
+          "HTML",
+      }
+    ).catch(() => {});
+  }
+}
 
 // ================== INIT TELEGRAM BOT ==================
 function initTelegramBot() {
@@ -193,44 +789,164 @@ function initTelegramBot() {
   bot.onText(/\/getgroupid/i, async (msg) => await sendGroupInfo(msg));
 
   // Command: /ai [pertanyaan] → interaksi dengan AI (RAG + Tools) kek mana buat cantik 
-  bot.onText(/\/ai(?: (.+))?/s, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const userInput = match?.[1]?.trim();
+bot.onText(
+  /\/ai(?:\s+([\s\S]+))?$/i,
+  async (msg, match) => {
+    const chatId =
+      msg.chat.id;
+
+    const userInput =
+      match?.[1]?.trim();
 
     if (!userInput) {
-      await bot.sendMessage(chatId,
-        "Silakan berikan pertanyaan setelah command /ai.\n\nContoh:\n<code>/ai tampilkan detail tiket INC-20260709-0012</code>",
-        { parse_mode: 'HTML' }
+      await bot.sendMessage(
+        chatId,
+
+        `🤖 <b>BEACON AI ASSISTANT</b>\n\n` +
+
+        `<b>1. Tanya AI</b>\n` +
+        `Gunakan untuk mencari tiket, SOP, atau knowledge internal.\n\n` +
+        `Contoh:\n` +
+        `<code>/ai tampilkan detail tiket TCK-20260709-0012</code>\n` +
+        `<code>/ai bagaimana prosedur opening instance access?</code>\n\n` +
+
+        `━━━━━━━━━━━━━━━━━━━━━\n` +
+
+        `✏️ <b>Edit Tiket via AI — Quick Update</b>\n\n` +
+        `Kirimkan format:\n` +
+        `<code>/ai [ID] [PROJECT] [SEVERITY] [SUMMARY] [CATEGORY opsional]</code>\n\n` +
+
+        `<b>Contoh tanpa Category:</b>\n` +
+        `<code>/ai [2389] [EPC Tools] [EMERGENCY] [Update Facts Lookup Price Zone]</code>\n\n` +
+
+        `<b>Contoh dengan Category:</b>\n` +
+        `<code>/ai [2389] [EPC Tools] [EMERGENCY] [Update Facts Lookup Price Zone] [Change Management]</code>\n\n` +
+
+        `<b>Severity:</b>\n` +
+        `• EMERGENCY\n` +
+        `• HIGH\n` +
+        `• MEDIUM\n` +
+        `• LOW\n` +
+        `• OTHERS\n\n` +
+
+        `<b>Category:</b>\n` +
+        `• Change Management\n` +
+        `• Incident Management\n` +
+        `• Knowledge Management\n` +
+        `• Problem Management\n` +
+        `• Relationship Management\n` +
+        `• Service Request Management`,
+
+        {
+          parse_mode:
+            "HTML",
+        }
       );
+
       return;
     }
 
-  const thinkingMsg = await bot.sendMessage(
-    chatId,
-    "🤖 AI sedang berpikir...",
-    {
-      reply_to_message_id: msg.message_id,
+    /*
+     * Periksa apakah input merupakan Quick Update.
+     */
+    const quickUpdateResult =
+      parseAiQuickUpdate(
+        userInput
+      );
+
+    if (
+      quickUpdateResult.isQuickUpdate
+    ) {
+      if (!quickUpdateResult.valid) {
+        await bot.sendMessage(
+          chatId,
+
+          `❌ <b>Format Quick Update tidak valid</b>\n\n` +
+          `${escapeHTML(
+            quickUpdateResult.error
+          )}\n\n` +
+          `Format yang benar:\n` +
+          `<code>/ai [ID] [PROJECT] [SEVERITY] [SUMMARY] [CATEGORY opsional]</code>\n\n` +
+          `Contoh:\n` +
+          `<code>/ai [2389] [EPC Tools] [EMERGENCY] [Update Facts Lookup Price Zone] [Change Management]</code>`,
+
+          {
+            parse_mode:
+              "HTML",
+          }
+        );
+
+        return;
+      }
+
+      await handleAiQuickTicketUpdate(
+        msg,
+        quickUpdateResult.data
+      );
+
+      return;
     }
-  );
+
+    /*
+     * Bukan Quick Update.
+     * Jalankan AI Q&A dan RAG seperti biasa.
+     */
+    const thinkingMessage =
+      await bot.sendMessage(
+        chatId,
+        "🤖 AI sedang berpikir...",
+        {
+          reply_to_message_id:
+            msg.message_id,
+        }
+      );
 
     try {
-      const aiReply = await chatWithAI(userInput);
-      // Coba kirim dengan Markdown, fallback ke plain text jika parsing gagal
-      try {
-        await bot.editMessageText(aiReply, { chat_id: chatId, message_id: thinkingMsg.message_id, parse_mode: "Markdown" });
-      } catch (parseErr) {
-        if (parseErr.message?.includes('parse entities') || parseErr.message?.includes('400')) {
-          // Markdown parsing gagal → kirim ulang sebagai plain text
-          await bot.editMessageText(aiReply, { chat_id: chatId, message_id: thinkingMsg.message_id });
-        } else {
-          throw parseErr;
+      const aiReply =
+        await chatWithAI(
+          userInput
+        );
+
+      const finalReply =
+        String(aiReply || "").trim() ||
+        "Maaf, AI tidak menghasilkan jawaban.";
+
+      /*
+       * Plain text agar tidak terjadi error
+       * can't parse entities.
+       */
+      await bot.editMessageText(
+        finalReply,
+        {
+          chat_id:
+            chatId,
+
+          message_id:
+            thinkingMessage.message_id,
         }
-      }
-    } catch (err) {
-      console.error("❌ Gagal memproses command /ai:", err.message);
-      await bot.editMessageText("Maaf, terjadi kesalahan saat memproses permintaan Anda.", { chat_id: chatId, message_id: thinkingMsg.message_id }).catch(() => {});
+      );
+    } catch (error) {
+      console.error(
+        "❌ Gagal memproses command /ai:",
+        error.message
+      );
+
+      await bot.editMessageText(
+        "Maaf, terjadi kesalahan saat memproses permintaan Anda.",
+        {
+          chat_id:
+            chatId,
+
+          message_id:
+            thinkingMessage.message_id,
+        }
+      ).catch(() => {});
     }
-  });
+  }
+);
+
+// close untuk AI nyaa
+
   // Command: /tiket atau /tiket baru → mulai manual input
   bot.onText(/\/tiket(\s+baru)?/i, async (msg) => {
     const chatId = msg.chat.id.toString();
@@ -2177,7 +2893,7 @@ async function handleRepairPublish(query, chatId, userId, ticketId) {
 
     // Buat payload update — JANGAN sentuh processed_at dan ticket_id
     const updatePayload = {};
-    const allowedUpdateFields = ['from', 'subject', 'body', 'summary', 'category', 'priority', 'source', 'status'];
+    const allowedUpdateFields = ['from', 'subject', 'body', 'summary', 'category', 'priority', 'severity', 'project', 'source', 'status'];
 
     for (const field of allowedUpdateFields) {
       if (repairData[field] !== undefined && repairData[field] !== originalTicket[field]) {
@@ -2253,25 +2969,83 @@ function formatCandidateTicketMessage(ticket) {
 }
 
 // ================== HELPER: FORMAT PESAN TIKET DIKONFIRMASI (setelah ✅) ==================
+// function formatConfirmedTicketMessage(ticket) {
+//   const intakeId = ticket.ticket_id || ticket.id || '-';
+//   const sourceLabel = ticket.source || 'System';
+//   const sourceName = ticket.group_name || ticket.subject || '(No Subject)';
+//   const sender = ticket.from || '-';
+//   const receivedTime = ticket.processed_at ? new Date(ticket.processed_at).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' }) : '-';
+
+//   return (
+//     `✅ <b>TIKET DIKONFIRMASI</b>\n` +
+//     `━━━━━━━━━━━━━━━━━━━━━\n` +
+//     `🎫 Ticket ID : <code>${escapeHTML(String(intakeId))}</code>\n` +
+//     `📱 Sumber    : ${escapeHTML(sourceLabel)}\n` +
+//     `👥 Grup/Subjek: ${escapeHTML(sourceName)}\n` +
+//     `👤 Pengirim  : ${escapeHTML(sender)}\n` +
+//     `⏰ Waktu     : ${escapeHTML(receivedTime)}\n` +
+//     `━━━━━━━━━━━━━━━━━━━━━\n` +
+//     `📝 <b>Isi Pesan</b>\n` +
+//     `${escapeHTML(String(ticket.body || '-').substring(0, 1500))}\n\n` +
+//     `<i>✅ Tiket dikonfirmasi. Timer SLA mulai berjalan.</i>`
+//   );
+// }
 function formatConfirmedTicketMessage(ticket) {
-  const intakeId = ticket.ticket_id || ticket.id || '-';
-  const sourceLabel = ticket.source || 'System';
-  const sourceName = ticket.group_name || ticket.subject || '(No Subject)';
-  const sender = ticket.from || '-';
-  const receivedTime = ticket.processed_at ? new Date(ticket.processed_at).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' }) : '-';
+  const ticketId = ticket.ticket_id ||ticket.id ||"-";
+  const sourceLabel = ticket.source ||"System";
+  const sourceName = ticket.group_name ||ticket.subject ||"(No Subject)";
+  const sender = ticket.from || "-";
+  const project = ticket.project ||"Others";
+  const category = ticket.category || "-";
+  const severity = ticket.severity ||ticket.priority ||"-";
+  const summary = ticket.summary ||"-";
+  const body = ticket.body || "-";
+  const receivedTime = ticket.processed_at ? new Date(ticket.processed_at).toLocaleString("id-ID",{timeZone:"Asia/Jakarta",}): "-";
 
   return (
     `✅ <b>TIKET DIKONFIRMASI</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🎫 Ticket ID : <code>${escapeHTML(String(intakeId))}</code>\n` +
-    `📱 Sumber    : ${escapeHTML(sourceLabel)}\n` +
-    `👥 Grup/Subjek: ${escapeHTML(sourceName)}\n` +
-    `👤 Pengirim  : ${escapeHTML(sender)}\n` +
-    `⏰ Waktu     : ${escapeHTML(receivedTime)}\n` +
+    `🎫 Ticket ID   : <code>${escapeHTML(
+      String(ticketId)
+    )}</code>\n` +
+    `📱 Sumber      : ${escapeHTML(
+      sourceLabel
+    )}\n` +
+    `👥 Grup/Subjek : ${escapeHTML(
+      sourceName
+    )}\n` +
+    `👤 Pengirim    : ${escapeHTML(
+      sender
+    )}\n` +
+    `⏰ Waktu       : ${escapeHTML(
+      receivedTime
+    )}\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `📝 <b>Isi Pesan</b>\n` +
-    `${escapeHTML(String(ticket.body || '-').substring(0, 1500))}\n\n` +
-    `<i>✅ Tiket dikonfirmasi. Timer SLA mulai berjalan.</i>`
+    `🖥 Project     : <b>${escapeHTML(
+      project
+    )}</b>\n` +
+    `🗂 Category    : <b>${escapeHTML(
+      category
+    )}</b>\n` +
+    `🚦 Severity    : <b>${escapeHTML(
+      severity
+    )}</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n` +
+    `🗒 <b>Summary</b>\n` +
+    `${escapeHTML(
+      String(summary).substring(
+        0,
+        500
+      )
+    )}\n\n` +
+    `💬 <b>Body / Isi Tiket</b>\n` +
+    `${escapeHTML(
+      String(body).substring(
+        0,
+        1500
+      )
+    )}\n\n` +
+    `<i>✅ Tiket dikonfirmasi. Timer SLA sedang berjalan.</i>`
   );
 }
 

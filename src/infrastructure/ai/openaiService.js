@@ -971,6 +971,7 @@ ${rawText}
   }
 }
 
+
 export function isSmallTalk(text) {
   const trimmed = text.trim();
   if (!trimmed) return true;
@@ -1178,6 +1179,107 @@ Keluarkan hasil dalam format JSON valid berikut:
   }
 }
 
+function buildFallbackTicketSummary(rawBody) {
+  let summary = String(rawBody || "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  summary = summary
+    .replace(
+      /^(tolong(?:\s+saya)?|mohon(?:\s+bantuannya)?|mohon\s+bantu|bantu\s+saya)[,:]?\s*/i,
+      ""
+    )
+    .replace(
+      /\b(gak|ga|nggak)\s+bisa\b/gi,
+      "tidak dapat dilakukan"
+    );
+
+  if (summary.length > 180) {
+    summary =
+      summary.substring(0, 177).trim() +
+      "...";
+  }
+
+  return summary;
+}
+
+/**
+ * Membuat ringkasan singkat dari body tiket.
+ * Body asli tidak diubah.
+ */
+async function generateTicketSummary(rawBody) {
+  const normalizedBody =
+    String(rawBody || "").trim();
+
+  if (!normalizedBody) {
+    return "";
+  }
+
+  try {
+    const response =
+      await callOpenAIChatCompletion({
+        model: AI_MODEL,
+
+        messages: [
+          {
+            role: "system",
+            content:
+              "Anda membuat summary singkat untuk tiket ITSM. " +
+              "Ambil inti masalah atau permintaan dari teks mentah. " +
+              "Gunakan satu kalimat bahasa Indonesia, maksimal 160 karakter. " +
+              "Pertahankan nama aplikasi, project, report, fitur, command, dan istilah teknis. " +
+              "Pertahankan informasi waktu jika relevan. " +
+              "Jangan menambahkan fakta yang tidak terdapat pada teks. " +
+              "Jangan gunakan markdown, bullet, tanda kutip, atau penjelasan tambahan. " +
+              "Kembalikan hanya summary.",
+          },
+          {
+            role: "user",
+            content: normalizedBody,
+          },
+        ],
+
+        temperature: 0.1,
+        max_tokens: 100,
+      });
+
+    let summary =
+      response.choices[0]?.message?.content ||
+      "";
+
+    summary = summary
+      .replace(/\s+/g, " ")
+      .replace(
+        /^["'`]+|["'`]+$/g,
+        ""
+      )
+      .trim();
+
+    if (!summary) {
+      return buildFallbackTicketSummary(
+        normalizedBody
+      );
+    }
+
+    if (summary.length > 180) {
+      summary =
+        summary.substring(0, 177).trim() +
+        "...";
+    }
+
+    return summary;
+  } catch (error) {
+    console.warn(
+      "⚠️ AI summary gagal, menggunakan fallback:",
+      error.message
+    );
+
+    return buildFallbackTicketSummary(
+      normalizedBody
+    );
+  }
+}
+
 export {
   getActiveTickets,
   queryTickets,
@@ -1187,5 +1289,6 @@ export {
   checkMessageRelevance,
   routeMessageToActiveTickets,
   detectStatusChangeFromReply,
-  extractTicketFields
+  extractTicketFields,
+  generateTicketSummary
 };
