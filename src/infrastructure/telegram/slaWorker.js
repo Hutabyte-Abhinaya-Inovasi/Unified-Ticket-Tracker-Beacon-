@@ -3,8 +3,9 @@
 // Alur SLA Beacon (dua looping):
 //
 // ── LOOPING 1: SLA KONFIRMASI (15 Menit) ──────────────────────────────────
-//   → Tiket baru masuk (Pending Confirmation) → intake_received_at di-set
-//   → WARN  : waktu tunggu >= 10 menit, belum dikonfirmasi → alarm ke Beacon
+//   → Tiket baru masuk → intake_received_at di-set
+//   → Pengecekan berlaku untuk semua status kecuali Done
+//   → WARN  : sisa waktu <= 10 menit (mulai sekitar menit ke-5), belum dikonfirmasi
 //   → ALERT : waktu tunggu >= 15 menit, belum dikonfirmasi → alarm URGENT ke Beacon
 //
 // ── LOOPING 2: SLA PEKERJAAN (2 Jam / sesuai severity) ───────────────────
@@ -32,8 +33,9 @@ const SLA_MINUTES = {
 };
 
 // ── LOOPING 1: Batas waktu SLA Konfirmasi ────────────────────────────────
-const SLA_CONFIRM_MINUTES      = 15;  // batas konfirmasi 15 menit
-const SLA_CONFIRM_WARN_MINUTES = 9;   // warn saat sudah 9 menit belum dikonfirmasi (memberikan sisa 6 menit agar tidak mepet)
+const SLA_CONFIRM_MINUTES = 15; // batas konfirmasi 15 menit
+const SLA_CONFIRM_WARN_REMAINING_MINUTES = 10; // peringatan saat sisa waktu 10 menit
+const SLA_CONFIRM_WARN_REPEAT_MINUTES = 5; // kirim ulang peringatan setiap 5 menit
 
 // Peringatan SLA Pekerjaan dikirim saat sisa waktu <= 6 menit
 const WARN_MINUTES_REMAINING = 6;
@@ -56,6 +58,13 @@ function getBot() {
   return bot;
 }
 
+function escapeTelegramHtml(value = '-') {
+  return String(value ?? '-')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 /**
  * Kirim notifikasi ke Head/Service Lead (jeremy & fahrezy) saat eskalasi SLA Pekerjaan.
  * Menggunakan env: TG_JEREMY_ID dan TG_FAHREZY_ID
@@ -74,9 +83,9 @@ async function notifyHeadServiceLead(ticketId, severity, subject) {
   const sevEmoji = SEVERITY_EMOJI[(severity || 'MEDIUM').toUpperCase()] || '🟡';
   const msgToLead =
     `🆘 <b>ESKALASI OTOMATIS — SLA HABIS</b>\n\n` +
-    `${sevEmoji} Severity : <b>${(severity || 'MEDIUM').toUpperCase()}</b>\n` +
-    `🎫 Ticket ID : <code>${ticketId}</code>\n` +
-    `📌 Subjek    : ${subject || '-'}\n\n` +
+    `${sevEmoji} Severity : <b>${escapeTelegramHtml((severity || 'MEDIUM').toUpperCase())}</b>\n` +
+    `🎫 Ticket ID : <code>${escapeTelegramHtml(ticketId)}</code>\n` +
+    `📌 Subjek    : ${escapeTelegramHtml(subject)}\n\n` +
     `Tiket ini telah melewati batas waktu SLA dan belum dikerjakan.\n` +
     `<b>Mohon segera ditangani sebagai Head / Service Lead.</b>`;
 
@@ -97,13 +106,23 @@ async function checkSlaConfirmation() {
   // Semua peringatan & alert SLA ditujukan ke grup Beacon SLA & Escalation (Merah)
   const ALERT_CHAT_ID = (env.TG_BEACON_CHAT_ID || env.TG_CHAT_ID || '-1003753882093').trim();
   const tickets = await getTicketsNeedingConfirmationCheck();
+  console.log(`[SLA-Konfirmasi] Memeriksa ${tickets.length} tiket non-Done (chat ${ALERT_CHAT_ID})`);
 
   for (const t of tickets) {
-    const elapsedMin = (Date.now() - new Date(t.intake_received_at).getTime()) / 60000;
+    if (t.sla_confirm_alerted) continue;
+
+    const startedAt = t.intake_received_at || t.confirmed_at || t.processed_at || t.created_at;
+    const startedAtMs = new Date(startedAt).getTime();
+    if (!Number.isFinite(startedAtMs)) {
+      console.warn(`[SLA-Konfirmasi] Timestamp awal tidak valid untuk tiket ${t.ticket_id}; tiket dilewati.`);
+      continue;
+    }
+
+    const elapsedMin = (Date.now() - startedAtMs) / 60000;
     const sevEmoji   = SEVERITY_EMOJI[(t.priority || t.severity || 'MEDIUM').toUpperCase()] || '🟡';
 
     const reachedAlert = elapsedMin >= SLA_CONFIRM_MINUTES;
-    const reachedWarn  = elapsedMin >= SLA_CONFIRM_WARN_MINUTES;
+    const reachedWarn  = elapsedMin >= SLA_CONFIRM_MINUTES - SLA_CONFIRM_WARN_REMAINING_MINUTES;
 
     // ── ALERT: 15 menit habis, belum dikonfirmasi ──────────────────────────
     if (reachedAlert) {
@@ -111,9 +130,9 @@ async function checkSlaConfirmation() {
 
       const alertText =
         `🚨 <b>SLA KONFIRMASI HABIS — TIKET BELUM DIKONFIRMASI!</b>\n\n` +
-        `${sevEmoji} Severity  : <b>${(t.priority || t.severity || 'MEDIUM').toUpperCase()}</b>\n` +
-        `🎫 Ticket ID : <code>${t.ticket_id}</code>\n` +
-        `📌 Subjek    : ${t.subject || '-'}\n` +
+        `${sevEmoji} Severity  : <b>${escapeTelegramHtml((t.priority || t.severity || 'MEDIUM').toUpperCase())}</b>\n` +
+        `🎫 Ticket ID : <code>${escapeTelegramHtml(t.ticket_id)}</code>\n` +
+        `📌 Subjek    : ${escapeTelegramHtml(t.subject)}\n` +
         `⏱ Waktu tunggu: <b>${Math.round(elapsedMin)} menit</b> (batas: ${SLA_CONFIRM_MINUTES} menit)\n\n` +
         `⚠️ Tiket ini belum dikonfirmasi di Ticket Operations selama <b>${SLA_CONFIRM_MINUTES} menit</b>.\n` +
         `<i>Mohon segera pantau dan tindak lanjuti pada grup Ticket Operations.</i>`;
@@ -137,16 +156,21 @@ async function checkSlaConfirmation() {
       continue;
     }
 
-    // ── WARN: 10 menit, belum dikonfirmasi ──────────────────────────────────
+    // ── WARN: sisa <= 10 menit, ulang setiap 5 menit ──────────────────────
     if (reachedWarn) {
-      if (t.sla_confirm_warned) continue; // sudah pernah dikirim
+      const lastWarnedAt = t.sla_confirm_last_warned_at
+        ? new Date(t.sla_confirm_last_warned_at).getTime()
+        : null;
+      const warnIntervalElapsed = !Number.isFinite(lastWarnedAt) ||
+        Date.now() - lastWarnedAt >= SLA_CONFIRM_WARN_REPEAT_MINUTES * 60_000;
+      if (!warnIntervalElapsed) continue;
 
       const sisaMin = Math.max(0, Math.round(SLA_CONFIRM_MINUTES - elapsedMin));
       const warnText =
-        `⏰ <b>Peringatan SLA Konfirmasi — Sisa ${sisaMin} Menit!</b>\n\n` +
-        `${sevEmoji} Severity  : <b>${(t.priority || t.severity || 'MEDIUM').toUpperCase()}</b>\n` +
-        `🎫 Ticket ID : <code>${t.ticket_id}</code>\n` +
-        `📌 Subjek    : ${t.subject || '-'}\n` +
+        `🔔 <b>ALERT — Sisa waktu Confirmation tinggal ${sisaMin} menit!</b>\n\n` +
+        `${sevEmoji} Severity  : <b>${escapeTelegramHtml((t.priority || t.severity || 'MEDIUM').toUpperCase())}</b>\n` +
+        `🎫 Ticket ID : <code>${escapeTelegramHtml(t.ticket_id)}</code>\n` +
+        `📌 Subjek    : ${escapeTelegramHtml(t.subject)}\n` +
         `⏳ Sudah menunggu: <b>${Math.round(elapsedMin)} menit</b>\n` +
         `⏱ Sisa konfirmasi: <b>${sisaMin} menit lagi</b>\n\n` +
         `⚠️ Tiket ini belum dikonfirmasi di Ticket Operations.`;
@@ -196,9 +220,9 @@ async function checkSla() {
 
       const alertText =
         `🚨 <b>INFORMASI URGENT — SLA HABIS!</b>\n\n` +
-        `${sevEmoji} Severity : <b>${severityKey}</b>\n` +
-        `🎫 Ticket ID : <code>${t.ticket_id}</code>\n` +
-        `📌 Subjek    : ${t.subject || '-'}\n` +
+        `${sevEmoji} Severity : <b>${escapeTelegramHtml(severityKey)}</b>\n` +
+        `🎫 Ticket ID : <code>${escapeTelegramHtml(t.ticket_id)}</code>\n` +
+        `📌 Subjek    : ${escapeTelegramHtml(t.subject)}\n` +
         `⏱ Waktu SLA : ${limitMin} menit (sudah habis)\n\n` +
         `⚠️ Tiket ini <b>BELUM dikerjakan</b> melebihi batas waktu SLA.\n` +
         `Sistem melakukan <b>eskalasi otomatis</b> ke Head / Service Lead.`;
@@ -238,9 +262,9 @@ async function checkSla() {
 
       const warnText =
         `⚠️ <b>Beacon SLA — Waktunya ${sisaMenit} menit lagi!</b>\n\n` +
-        `${sevEmoji} Severity : <b>${severityKey}</b>\n` +
-        `🎫 Ticket ID : <code>${t.ticket_id}</code>\n` +
-        `📌 Subjek    : ${t.subject || '-'}\n` +
+        `${sevEmoji} Severity : <b>${escapeTelegramHtml(severityKey)}</b>\n` +
+        `🎫 Ticket ID : <code>${escapeTelegramHtml(t.ticket_id)}</code>\n` +
+        `📌 Subjek    : ${escapeTelegramHtml(t.subject)}\n` +
         `⏱ Batas SLA : ${limitMin} menit\n` +
         `⏳ Sisa      : <b>${sisaMenit} menit lagi</b>\n\n` +
         `Tiket ini belum dikerjakan. Mohon segera ditangani sebelum SLA habis.`;
@@ -269,7 +293,7 @@ async function checkSla() {
 // Jalankan pengecekan setiap 60 detik (kedua looping)
 export function startSlaWorker() {
   console.log('[SLA] SLA Worker aktif (interval 60 detik)');
-  console.log(`[SLA] LOOPING 1 — SLA Konfirmasi: WARN >= ${SLA_CONFIRM_WARN_MINUTES} menit | ALERT >= ${SLA_CONFIRM_MINUTES} menit`);
+  console.log(`[SLA] LOOPING 1 — SLA Konfirmasi: WARN saat sisa <= ${SLA_CONFIRM_WARN_REMAINING_MINUTES} menit, ulang tiap ${SLA_CONFIRM_WARN_REPEAT_MINUTES} menit | ALERT >= ${SLA_CONFIRM_MINUTES} menit`);
   console.log(`[SLA] LOOPING 2 — SLA Pekerjaan : WARN sisa <= ${WARN_MINUTES_REMAINING} menit | ALERT saat waktu habis + Eskalasi`);
 
   setInterval(() => {
@@ -278,6 +302,6 @@ export function startSlaWorker() {
   }, 60_000);
 
   // Jalankan sekali langsung saat startup
-  checkSlaConfirmation().catch(() => { });
-  checkSla().catch(() => { });
+  checkSlaConfirmation().catch(err => console.error('[SLA-Konfirmasi] Error saat startup:', err.message));
+  checkSla().catch(err => console.error('[SLA] Error saat startup:', err.message));
 }

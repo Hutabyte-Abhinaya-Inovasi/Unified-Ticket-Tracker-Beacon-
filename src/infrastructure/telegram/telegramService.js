@@ -1934,12 +1934,21 @@ async function handleDraftPublish(query, chatId, ticketId) {
       return;
     }
 
-    // Update status ke In Progress dan set confirmed_at
+    // Mulai SLA Confirmation saat tiket manual dipublish, jika belum ada intake time
     const now = new Date().toISOString();
-    await updateTicket(ticketId, { status: 'In Progress', confirmed_at: now });
+    await updateTicket(ticketId, {
+      status: 'In Progress',
+      intake_received_at: ticket.intake_received_at || now,
+      confirmed_at: now,
+    });
 
     // Ambil tiket yang sudah di-update
-    const updatedTicket = await getTicketById(ticketId) || { ...ticket, status: 'In Progress', confirmed_at: now };
+    const updatedTicket = await getTicketById(ticketId) || {
+      ...ticket,
+      status: 'In Progress',
+      intake_received_at: ticket.intake_received_at || now,
+      confirmed_at: now,
+    };
 
     // Kirim tiket terkonfirmasi (✅ TIKET DIKONFIRMASI + 4 tombol) ke grup Operations (TG_UTT_CHAT_ID)
     await sendFinalTicketToBeacon(updatedTicket, UTT_CHAT_ID, 'In Progress', true);

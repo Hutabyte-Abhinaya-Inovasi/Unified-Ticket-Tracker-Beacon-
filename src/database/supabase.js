@@ -1138,25 +1138,24 @@ export async function markSlaFlag(ticketId, level) {
   return !error;
 }
 
-// G��G�� SLA KONFIRMASI: Ambil tiket Pending Confirmation yang intake_received_at sudah ada
+// Ambil tiket non-Done yang memiliki timestamp awal untuk pengecekan SLA konfirmasi
 // Digunakan oleh slaWorker checkSlaConfirmation() untuk Looping 1 (15 Menit)
 export async function getTicketsNeedingConfirmationCheck() {
   const { data, error } = await supabase
     .from('Unified_Ticket_Tracker')
-    .select('ticket_id, from, subject, priority, severity, intake_received_at, sla_confirm_warned, sla_confirm_alerted, telegram_chat_id, telegram_message_id')
-    .eq('status', 'Pending Confirmation')
-    .not('intake_received_at', 'is', null)
-    .eq('sla_confirm_alerted', false)   // belum pernah dikirim alert konfirmasi
-    .order('intake_received_at', { ascending: true });
+    .select('ticket_id, from, subject, priority, severity, intake_received_at, confirmed_at, processed_at, created_at, sla_confirm_warned, sla_confirm_last_warned_at, sla_confirm_alerted, telegram_chat_id, telegram_message_id')
+    .neq('status', 'Done')
+    .or('intake_received_at.not.is.null,confirmed_at.not.is.null,processed_at.not.is.null,created_at.not.is.null')
+    .order('intake_received_at', { ascending: true, nullsFirst: false });
 
-  if (error) { console.error('SLA Konfirmasi check query error:', error.message); return []; }
+  if (error) throw new Error(`SLA Konfirmasi check query error: ${error.message}`);
   return data || [];
 }
 
 // Set flag SLA Konfirmasi (confirm_warn / confirm_alert)
 export async function markSlaConfirmFlag(ticketId, level) {
   const field = level === 'warn'
-    ? { sla_confirm_warned: true }
+    ? { sla_confirm_warned: true, sla_confirm_last_warned_at: new Date().toISOString() }
     : { sla_confirm_alerted: true };
   const { error } = await supabase.from('Unified_Ticket_Tracker').update(field).eq('ticket_id', ticketId);
   if (error) console.error(`Gagal set SLA Konfirmasi flag [${level}] tiket ${ticketId}:`, error.message);

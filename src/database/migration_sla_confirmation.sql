@@ -12,6 +12,9 @@ ALTER TABLE "Unified_Ticket_Tracker"
   -- Flag: sudah dikirim peringatan SLA konfirmasi (misal 10 menit tanpa konfirmasi)
   ADD COLUMN IF NOT EXISTS sla_confirm_warned       BOOLEAN     DEFAULT FALSE,
 
+  -- Waktu warning terakhir untuk mengatur pengiriman ulang berkala
+  ADD COLUMN IF NOT EXISTS sla_confirm_last_warned_at TIMESTAMPTZ DEFAULT NULL,
+
   -- Flag: SLA konfirmasi sudah habis (15 menit tanpa konfirmasi) → notif eskalasi
   ADD COLUMN IF NOT EXISTS sla_confirm_alerted      BOOLEAN     DEFAULT FALSE,
 
