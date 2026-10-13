@@ -41,6 +41,9 @@ export const env = {
     process.env.OUTLINE_REQUEST_TIMEOUT_MS || "15000",
   OUTLINE_MAX_RETRY:
     process.env.OUTLINE_MAX_RETRY || "3",
+
+  // Microsoft Teams Webhook URL
+  TEAMS_WEBHOOK_URL: process.env.TEAMS_WEBHOOK_URL || null,
 };
 
 

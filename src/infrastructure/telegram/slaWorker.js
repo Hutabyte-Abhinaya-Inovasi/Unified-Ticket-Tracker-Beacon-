@@ -14,6 +14,7 @@
 
 import TelegramBot from 'node-telegram-bot-api';
 import { env } from '../../config/env.js';
+import { sendTeamsSlaAlert } from '../teams/teamsService.js';
 import {
   getTicketsNeedingSlaCheck,
   getTicketsNeedingConfirmationCheck,
@@ -93,7 +94,8 @@ async function notifyHeadServiceLead(ticketId, severity, subject) {
 // LOOPING 1: SLA KONFIRMASI — cek tiket Pending Confirmation (15 Menit)
 // ══════════════════════════════════════════════════════════════════
 async function checkSlaConfirmation() {
-  const SLA_CHAT_ID = (env.TG_UTT_CHAT_ID || env.TG_CHAT_ID).trim();
+  // Semua peringatan & alert SLA ditujukan ke grup Beacon SLA & Escalation (Merah)
+  const ALERT_CHAT_ID = (env.TG_BEACON_CHAT_ID || env.TG_CHAT_ID || '-1003753882093').trim();
   const tickets = await getTicketsNeedingConfirmationCheck();
 
   for (const t of tickets) {
@@ -113,14 +115,22 @@ async function checkSlaConfirmation() {
         `🎫 Ticket ID : <code>${t.ticket_id}</code>\n` +
         `📌 Subjek    : ${t.subject || '-'}\n` +
         `⏱ Waktu tunggu: <b>${Math.round(elapsedMin)} menit</b> (batas: ${SLA_CONFIRM_MINUTES} menit)\n\n` +
-        `⚠️ Tiket ini belum dikonfirmasi selama <b>${SLA_CONFIRM_MINUTES} menit</b>.\n` +
-        `Silakan segera tentukan apakah ini tiket atau bukan.\n\n` +
-        `<i>Cari tiket di grup dan tekan tombol [✅ Ini Tiket] atau [❌ Bukan Tiket].</i>`;
+        `⚠️ Tiket ini belum dikonfirmasi di Ticket Operations selama <b>${SLA_CONFIRM_MINUTES} menit</b>.\n` +
+        `<i>Mohon segera pantau dan tindak lanjuti pada grup Ticket Operations.</i>`;
 
       try {
-        await getBot().sendMessage(SLA_CHAT_ID, alertText, { parse_mode: 'HTML' });
+        await getBot().sendMessage(ALERT_CHAT_ID, alertText, { parse_mode: 'HTML' });
         await markSlaConfirmFlag(t.ticket_id, 'alert');
-        console.log(`[SLA-Konfirmasi] ALERT terkirim untuk tiket ${t.ticket_id} (${Math.round(elapsedMin)} menit belum dikonfirmasi)`);
+        console.log(`[SLA-Konfirmasi] ALERT terkirim ke Beacon SLA untuk tiket ${t.ticket_id} (${Math.round(elapsedMin)} menit belum dikonfirmasi)`);
+
+        // Kirim juga ke Microsoft Teams
+        sendTeamsSlaAlert({
+          type: 'confirm_alert',
+          ticketId: t.ticket_id,
+          severity: t.priority || t.severity,
+          subject: t.subject,
+          elapsedMin: elapsedMin,
+        }).catch(err => console.error('[SLA-Teams] Gagal kirim confirm alert:', err.message));
       } catch (err) {
         console.error(`[SLA-Konfirmasi] Gagal kirim ALERT tiket ${t.ticket_id}:`, err.message);
       }
@@ -139,12 +149,22 @@ async function checkSlaConfirmation() {
         `📌 Subjek    : ${t.subject || '-'}\n` +
         `⏳ Sudah menunggu: <b>${Math.round(elapsedMin)} menit</b>\n` +
         `⏱ Sisa konfirmasi: <b>${sisaMin} menit lagi</b>\n\n` +
-        `Tiket ini belum dikonfirmasi. Mohon segera tentukan apakah ini tiket.`;
+        `⚠️ Tiket ini belum dikonfirmasi di Ticket Operations.`;
 
       try {
-        await getBot().sendMessage(SLA_CHAT_ID, warnText, { parse_mode: 'HTML' });
+        await getBot().sendMessage(ALERT_CHAT_ID, warnText, { parse_mode: 'HTML' });
         await markSlaConfirmFlag(t.ticket_id, 'warn');
-        console.log(`[SLA-Konfirmasi] WARN terkirim untuk tiket ${t.ticket_id} (sisa ${sisaMin} menit)`);
+        console.log(`[SLA-Konfirmasi] WARN terkirim ke Beacon SLA untuk tiket ${t.ticket_id} (sisa ${sisaMin} menit)`);
+
+        // Kirim juga ke Microsoft Teams
+        sendTeamsSlaAlert({
+          type: 'confirm_warn',
+          ticketId: t.ticket_id,
+          severity: t.priority || t.severity,
+          subject: t.subject,
+          elapsedMin: elapsedMin,
+          sisaMenit: sisaMin,
+        }).catch(err => console.error('[SLA-Teams] Gagal kirim confirm warn:', err.message));
       } catch (err) {
         console.error(`[SLA-Konfirmasi] Gagal kirim WARN tiket ${t.ticket_id}:`, err.message);
       }
@@ -156,7 +176,8 @@ async function checkSlaConfirmation() {
 // LOOPING 2: SLA PEKERJAAN — cek tiket In Progress (2 Jam / per severity)
 // ══════════════════════════════════════════════════════════════════
 async function checkSla() {
-  const SLA_CHAT_ID = (env.TG_UTT_CHAT_ID || env.TG_CHAT_ID).trim();
+  // Alert SLA Pekerjaan & Eskalasi ditujukan ke Beacon SLA & Escalation (Merah)
+  const SLA_CHAT_ID = (env.TG_BEACON_CHAT_ID || env.TG_CHAT_ID || '-1003753882093').trim();
   const tickets = await getTicketsNeedingSlaCheck();
 
   for (const t of tickets) {
@@ -195,6 +216,15 @@ async function checkSla() {
         // Notifikasi ke Head/Service Lead (jeremy & fahrezy)
         await notifyHeadServiceLead(t.ticket_id, severityKey, t.subject);
 
+        // Kirim juga ke Microsoft Teams
+        sendTeamsSlaAlert({
+          type: 'work_alert',
+          ticketId: t.ticket_id,
+          severity: severityKey,
+          subject: t.subject,
+          limitMin: limitMin,
+        }).catch(err => console.error('[SLA-Teams] Gagal kirim work alert:', err.message));
+
         console.log(`[SLA] ALERT + Eskalasi otomatis untuk tiket ${t.ticket_id}`);
       } catch (err) {
         console.error(`[SLA] Gagal kirim ALERT tiket ${t.ticket_id}:`, err.message);
@@ -219,6 +249,16 @@ async function checkSla() {
         await getBot().sendMessage(SLA_CHAT_ID, warnText, { parse_mode: 'HTML' });
         await markSlaFlag(t.ticket_id, 'warn');
         console.log(`[SLA] WARN terkirim untuk tiket ${t.ticket_id} (sisa ${sisaMenit} menit)`);
+
+        // Kirim juga ke Microsoft Teams
+        sendTeamsSlaAlert({
+          type: 'work_warn',
+          ticketId: t.ticket_id,
+          severity: severityKey,
+          subject: t.subject,
+          limitMin: limitMin,
+          sisaMenit: sisaMenit,
+        }).catch(err => console.error('[SLA-Teams] Gagal kirim work warn:', err.message));
       } catch (err) {
         console.error(`[SLA] Gagal kirim WARN tiket ${t.ticket_id}:`, err.message);
       }

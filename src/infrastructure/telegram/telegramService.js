@@ -2452,17 +2452,26 @@ async function handleBeaconEscalate(query, chatId, ticketId) {
       message_id: query.message.message_id
     }).catch(() => { });
 
-    // Kirim notifikasi eskalasi ke Beacon
-    await bot.sendMessage(chatId,
-      `⬆️ <b>Tiket Dieskala ke Head / Service Lead!</b>\n\n` +
+    // Kirim notifikasi eskalasi ke grup Beacon SLA & Escalation (Merah)
+    const BEACON_CHAT_ID = (env.TG_BEACON_CHAT_ID || env.TG_CHAT_ID || '-1003753882093').trim();
+    await bot.sendMessage(BEACON_CHAT_ID,
+      `⬆️ <b>ESKALASI TIKET DARI TICKET OPERATIONS</b>\n\n` +
       `🎫 Ticket ID  : <code>${escapeHTML(ticketId)}</code>\n` +
       `${sevEmoji} Severity   : <b>${escapeHTML(severity)}</b>\n` +
       `📌 Subjek     : ${escapeHTML(ticket?.subject || '-')}\n` +
       `👤 Dieskalasi : <b>${escapeHTML(by)}</b>\n` +
       `📊 Status     : <b>Escalated</b>\n\n` +
       `<i>Tiket ini telah diteruskan ke Head / Service Lead untuk penanganan lebih lanjut.</i>`,
-      { parse_mode: 'HTML', reply_to_message_id: query.message.message_id }
-    ).catch(() => { });
+      { parse_mode: 'HTML' }
+    ).catch((err) => { console.error('Gagal kirim eskalasi ke Beacon SLA:', err.message); });
+
+    // Jika tombol ditekan di grup lain (misal Ticket Operations), beri notifikasi konfirmasi di grup tersebut
+    if (chatId.toString() !== BEACON_CHAT_ID.toString()) {
+      await bot.sendMessage(chatId,
+        `⬆️ <b>Tiket <code>${escapeHTML(ticketId)}</code> telah berhasil dieskalasi ke grup Beacon SLA & Escalation.</b>`,
+        { parse_mode: 'HTML', reply_to_message_id: query.message.message_id }
+      ).catch(() => { });
+    }
 
     // Notifikasi DM ke jeremy & fahrezy (jika env var tersedia)
     const leads = [env.TG_JEREMY_ID, env.TG_FAHREZY_ID].filter(Boolean);
