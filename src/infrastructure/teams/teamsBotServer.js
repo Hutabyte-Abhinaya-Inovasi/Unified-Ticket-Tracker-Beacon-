@@ -57,6 +57,26 @@ export function startTeamsBotServer() {
     });
   });
 
+  // Route khusus untuk Power Automate / Workflows
+  app.post("/api/workflows", async (req, res) => {
+    try {
+      const rawText = req.body?.text || req.body?.message || "";
+      const sender = req.body?.sender || "Teams User";
+      const cleanText = rawText.replace(/<[^>]*>/g, "").trim();
+
+      if (!cleanText) {
+        return res.json({ reply: "Halo! Ketik `/help` atau `/ai [pertanyaan]` untuk berinteraksi." });
+      }
+
+      console.log(`[Workflows API] 📩 Menerima dari ${sender}: "${cleanText}"`);
+      const reply = await processCommandText(cleanText);
+      return res.json({ reply: reply || "AI tidak memberikan respon." });
+    } catch (err) {
+      console.error("[Workflows API] Error:", err.message);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // Main Endpoint Messaging dari Microsoft Teams
   app.post("/api/messages", async (req, res) => {
     await adapter.process(req, res, async (context) => {
@@ -239,6 +259,42 @@ async function handleIncomingMessage(context) {
     console.error("[Teams Bot] Error chatWithAI:", err.message);
     await context.sendActivity("⚠️ Maaf, terjadi kesalahan saat menghubungi layanan AI.");
   }
+}
+
+/**
+ * Logika pemroses perintah untuk Teams Bot dan Workflows
+ */
+export async function processCommandText(cleanText) {
+  const lower = cleanText.toLowerCase();
+
+  if (lower === "/help" || lower === "/menu" || lower === "help") {
+    return "🤖 **Menu Bantuan Hutabot AI (Beacon)**\n\n• `💬 /ai <pertanyaan>` : Tanya AI & Panduan Troubleshooting\n• `🎫 /status <ticket_id>` : Cek status & detail tiket\n• `🔍 /cari <kata_kunci>` : Cari tiket berdasarkan subjek/deskripsi\n• `📋 /help` : Buka menu bantuan ini";
+  }
+
+  if (lower.startsWith("/status")) {
+    const parts = cleanText.split(" ");
+    const ticketId = parts[1]?.trim();
+    if (!ticketId) return "⚠️ Harap cantumkan Ticket ID. Contoh: `/status TCK-20261013-0011`";
+    const ticket = await getTicketById(ticketId);
+    if (!ticket) return `❌ Tiket dengan ID \`${ticketId}\` tidak ditemukan.`;
+    return `🎫 **Detail Tiket: ${ticket.ticket_id}**\n• Status: **${ticket.status || "-"}**\n• Severity: **${(ticket.severity || ticket.priority || "-").toUpperCase()}**\n• Project: **${ticket.project || "-"}**\n• Subjek: ${ticket.subject || "-"}\n• PIC: ${ticket.pic || ticket.operator_name || "Belum ada"}`;
+  }
+
+  if (lower.startsWith("/cari") || lower.startsWith("/search")) {
+    const query = cleanText.replace(/^\/(cari|search)\s*/i, "").trim();
+    if (!query) return "⚠️ Harap masukkan kata kunci. Contoh: `/cari mediation`";
+    const results = await searchTickets(query);
+    if (!results || results.length === 0) return `🔍 Tidak ditemukan tiket dengan kata kunci: **"${query}"**`;
+    const top5 = results.slice(0, 5);
+    const listText = top5.map((t) => `• \`${t.ticket_id}\` [${t.status}] - **${t.subject || "No Subject"}**`).join("\n");
+    return `🔍 **Hasil Pencarian "${query}":**\n\n${listText}\n\n_Gunakan \`/status <ticket_id>\` untuk melihat rincian._`;
+  }
+
+  let prompt = cleanText;
+  if (lower.startsWith("/ai")) {
+    prompt = cleanText.replace(/^\/ai\s*/i, "").trim();
+  }
+  return await chatWithAI(prompt);
 }
 
 /**
