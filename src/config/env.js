@@ -44,6 +44,11 @@ export const env = {
 
   // Microsoft Teams Webhook URL
   TEAMS_WEBHOOK_URL: process.env.TEAMS_WEBHOOK_URL || null,
+
+  // Microsoft Teams Bot Framework Credentials
+  MICROSOFT_APP_ID: process.env.MICROSOFT_APP_ID || null,
+  MICROSOFT_APP_PASSWORD: process.env.MICROSOFT_APP_PASSWORD || null,
+  TEAMS_BOT_PORT: process.env.TEAMS_BOT_PORT ? parseInt(process.env.TEAMS_BOT_PORT, 10) : 3978,
 };
 
 

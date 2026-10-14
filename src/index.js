@@ -10,6 +10,7 @@ import { startSlaWorker } from "./infrastructure/telegram/slaWorker.js";
 import { startEmailListener } from "./infrastructure/email/emailService.js";
 import { startClickupListener } from "./infrastructure/clickup/clickupListener.js";
 import { startTeamsListener } from "./infrastructure/teams/teamsListener.js";
+import { startTeamsBotServer } from "./infrastructure/teams/teamsBotServer.js";
 import { startIntakeMessageListener } from "./usecases/intakeMessageListener.js";
 console.log("🚀 Unified Incident Intake System");
 console.log("=====================================");
@@ -26,8 +27,11 @@ async function start() {
     console.log("⏰ Memulai SLA Worker...");
     startSlaWorker();
 
-    console.log("📢 Memulai Microsoft Teams Listener...");
+    console.log("📢 Memulai Microsoft Teams Listener (Webhook)...");
     startTeamsListener();
+
+    console.log("🤖 Memulai Microsoft Teams Bot Server (Hutabot AI)...");
+    startTeamsBotServer();
 
     console.log("📧 Memulai IMAP Email Listener...");
     startEmailListener();
