@@ -30,7 +30,8 @@ export function startTeamsBotServer() {
   const credentialsFactory = new ConfigurationServiceClientCredentialFactory({
     MicrosoftAppId: env.MICROSOFT_APP_ID,
     MicrosoftAppPassword: env.MICROSOFT_APP_PASSWORD,
-    MicrosoftAppType: "MultiTenant",
+    MicrosoftAppType: env.MICROSOFT_APP_TYPE || "SingleTenant",
+    MicrosoftAppTenantId: env.MICROSOFT_APP_TENANT_ID || "e66d53eb-7157-4115-a05e-f14a6c7a432b",
   });
 
   const botFrameworkAuthentication = createBotFrameworkAuthenticationFromConfiguration(null, credentialsFactory);

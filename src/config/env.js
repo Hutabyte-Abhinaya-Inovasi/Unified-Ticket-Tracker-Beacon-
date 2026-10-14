@@ -48,6 +48,8 @@ export const env = {
   // Microsoft Teams Bot Framework Credentials
   MICROSOFT_APP_ID: process.env.MICROSOFT_APP_ID || null,
   MICROSOFT_APP_PASSWORD: process.env.MICROSOFT_APP_PASSWORD || null,
+  MICROSOFT_APP_TYPE: process.env.MICROSOFT_APP_TYPE || "SingleTenant",
+  MICROSOFT_APP_TENANT_ID: process.env.MICROSOFT_APP_TENANT_ID || "e66d53eb-7157-4115-a05e-f14a6c7a432b",
   TEAMS_BOT_PORT: process.env.TEAMS_BOT_PORT ? parseInt(process.env.TEAMS_BOT_PORT, 10) : 3978,
 };
 
