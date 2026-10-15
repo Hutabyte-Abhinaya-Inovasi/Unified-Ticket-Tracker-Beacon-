@@ -92,8 +92,8 @@ export function startTeamsBotServer() {
   });
 
   const port = env.TEAMS_BOT_PORT || 3978;
-  serverInstance = app.listen(port, "0.0.0.0", () => {
-    console.log(`🤖 [Teams Bot] Server aktif mendengarkan di port ${port}`);
+  serverInstance = app.listen(port, "127.0.0.1", () => {
+    console.log(`🤖 [Teams Bot] Server aktif mendengarkan di 127.0.0.1:${port}`);
     console.log(`🔗 [Teams Bot] Endpoint siap di: https://hutabyte.com/api/messages`);
   });
 
