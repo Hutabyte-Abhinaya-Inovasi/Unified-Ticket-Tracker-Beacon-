@@ -66,6 +66,11 @@ export async function sendTeamsSlaAlert({
   ticketId,
   severity = "MEDIUM",
   subject = "-",
+  sender = "-",
+  channel = "-",
+  receivedAt = null,
+  body = "",
+  taggedPersons = [],
   elapsedMin,
   limitMin,
   sisaMenit,
@@ -75,11 +80,41 @@ export async function sendTeamsSlaAlert({
   let headerTitle = "⚠️ PERINGATAN SLA BEACON";
   let headerColor = "Warning"; // 'Good' | 'Warning' | 'Attention' | 'Default'
   let description = "";
+
+  const dateStr = receivedAt
+    ? new Date(receivedAt).toLocaleString("id-ID", {
+        timeZone: "Asia/Jakarta",
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : null;
+
+  const hasTagged = Array.isArray(taggedPersons) && taggedPersons.length > 0;
+  const taggedText = hasTagged
+    ? taggedPersons.map((p) => (p.email ? `@${p.name} (${p.email})` : `@${p.name}`)).join(", ")
+    : null;
+
   const facts = [
-    { title: "🎫 Ticket ID:", value: ticketId || "-" },
-    { title: "📌 Severity:", value: sevUpper },
-    { title: "📝 Subjek:", value: subject || "-" },
+    { title: "🎫 Ticket ID:", value: String(ticketId || "-") },
   ];
+
+  if (channel && channel !== "-") {
+    facts.push({ title: "📡 Channel:", value: String(channel).toUpperCase() });
+  }
+  if (sender && sender !== "-") {
+    facts.push({ title: "👤 Pengirim:", value: String(sender) });
+  }
+  if (dateStr) {
+    facts.push({ title: "🕒 Waktu Diterima:", value: dateStr });
+  }
+  if (taggedText) {
+    facts.push({ title: "🏷️ Tagged PIC:", value: taggedText });
+  }
+  facts.push({ title: "📌 Severity:", value: sevUpper });
+  facts.push({ title: "📝 Subjek:", value: subject || "-" });
 
   if (type === "confirm_warn") {
     headerTitle = "⏰ PERINGATAN SLA KONFIRMASI";
@@ -135,6 +170,16 @@ export async function sendTeamsSlaAlert({
       spacing: "Medium",
     },
   ];
+
+  if (body && String(body).trim()) {
+    cardBody.push({
+      type: "TextBlock",
+      text: `**Cuplikan Pesan:**\n${String(body).trim().slice(0, 350)}...`,
+      wrap: true,
+      spacing: "Small",
+      isSubtle: true,
+    });
+  }
 
   return await sendTeamsAdaptiveCard(cardBody, headerTitle);
 }

@@ -126,18 +126,37 @@ async function checkSlaConfirmation() {
     const reachedAlert = elapsedMin >= SLA_CONFIRM_MINUTES;
     const reachedWarn  = elapsedMin >= SLA_CONFIRM_MINUTES - SLA_CONFIRM_WARN_REMAINING_MINUTES;
 
+    const dateStr = startedAt
+      ? new Date(startedAt).toLocaleString("id-ID", {
+          timeZone: "Asia/Jakarta",
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "-";
+    const bodyPreview = (t.body || t.summary || "").trim();
+    const bodySection = bodyPreview
+      ? `\n\n💬 <b>Cuplikan Pesan:</b>\n<i>${escapeTelegramHtml(bodyPreview.slice(0, 350))}...</i>`
+      : "";
+
     // ── ALERT: 15 menit habis, belum dikonfirmasi ──────────────────────────
     if (reachedAlert) {
       if (t.sla_confirm_alerted) continue; // sudah pernah dikirim
 
       const alertText =
         `🚨 <b>SLA KONFIRMASI HABIS — TIKET BELUM DIKONFIRMASI!</b>\n\n` +
-        `${sevEmoji} Severity  : <b>${escapeTelegramHtml((t.priority || t.severity || 'MEDIUM').toUpperCase())}</b>\n` +
-        `🎫 Ticket ID : <code>${escapeTelegramHtml(t.ticket_id)}</code>\n` +
-        `📌 Subjek    : ${escapeTelegramHtml(t.subject)}\n` +
-        `⏱ Waktu tunggu: <b>${Math.round(elapsedMin)} menit</b> (batas: ${SLA_CONFIRM_MINUTES} menit)\n\n` +
-        `⚠️ Tiket ini belum dikonfirmasi di Ticket Operations selama <b>${SLA_CONFIRM_MINUTES} menit</b>.\n` +
-        `<i>Mohon segera pantau dan tindak lanjuti pada grup Ticket Operations.</i>`;
+        `🎫 <b>Ticket ID</b>   : <code>${escapeTelegramHtml(t.ticket_id)}</code>\n` +
+        `🕒 <b>Waktu</b>       : ${escapeTelegramHtml(dateStr)}\n` +
+        `📡 <b>Channel</b>     : ${escapeTelegramHtml(String(t.source || "Email").toUpperCase())}\n` +
+        `👤 <b>Pengirim</b>    : ${escapeTelegramHtml(t.from || "-")}\n` +
+        `📌 <b>Subjek</b>      : ${escapeTelegramHtml(t.subject)}\n` +
+        `${sevEmoji} <b>Severity</b>    : <b>${escapeTelegramHtml((t.priority || t.severity || 'MEDIUM').toUpperCase())}</b>\n` +
+        `⏱ <b>Waktu tunggu</b>: <b>${Math.round(elapsedMin)} menit</b> (batas: ${SLA_CONFIRM_MINUTES} menit)\n` +
+        `⚠️ <b>Status</b>      : Pending Confirmation (Exceeded)` +
+        bodySection +
+        `\n\n⚠️ <i>Tiket ini belum dikonfirmasi di Ticket Operations. Mohon segera pantau dan tindak lanjuti pada grup Ticket Operations.</i>`;
 
       try {
         await getBot().sendMessage(ALERT_CHAT_ID, alertText, { parse_mode: 'HTML' });
@@ -150,6 +169,10 @@ async function checkSlaConfirmation() {
           ticketId: t.ticket_id,
           severity: t.priority || t.severity,
           subject: t.subject,
+          sender: t.from,
+          channel: t.source,
+          receivedAt: startedAt,
+          body: t.body || t.summary,
           elapsedMin: elapsedMin,
         }).catch(err => console.error('[SLA-Teams] Gagal kirim confirm alert:', err.message));
       } catch (err) {
@@ -170,12 +193,16 @@ async function checkSlaConfirmation() {
       const sisaMin = Math.max(0, Math.round(SLA_CONFIRM_MINUTES - elapsedMin));
       const warnText =
         `🔔 <b>ALERT — Sisa waktu Confirmation tinggal ${sisaMin} menit!</b>\n\n` +
-        `${sevEmoji} Severity  : <b>${escapeTelegramHtml((t.priority || t.severity || 'MEDIUM').toUpperCase())}</b>\n` +
-        `🎫 Ticket ID : <code>${escapeTelegramHtml(t.ticket_id)}</code>\n` +
-        `📌 Subjek    : ${escapeTelegramHtml(t.subject)}\n` +
-        `⏳ Sudah menunggu: <b>${Math.round(elapsedMin)} menit</b>\n` +
-        `⏱ Sisa konfirmasi: <b>${sisaMin} menit lagi</b>\n\n` +
-        `⚠️ Tiket ini belum dikonfirmasi di Ticket Operations.`;
+        `🎫 <b>Ticket ID</b>   : <code>${escapeTelegramHtml(t.ticket_id)}</code>\n` +
+        `🕒 <b>Waktu</b>       : ${escapeTelegramHtml(dateStr)}\n` +
+        `📡 <b>Channel</b>     : ${escapeTelegramHtml(String(t.source || "Email").toUpperCase())}\n` +
+        `👤 <b>Pengirim</b>    : ${escapeTelegramHtml(t.from || "-")}\n` +
+        `📌 <b>Subjek</b>      : ${escapeTelegramHtml(t.subject)}\n` +
+        `${sevEmoji} <b>Severity</b>    : <b>${escapeTelegramHtml((t.priority || t.severity || 'MEDIUM').toUpperCase())}</b>\n` +
+        `⏳ <b>Sudah menunggu</b>: <b>${Math.round(elapsedMin)} menit</b>\n` +
+        `⏱ <b>Sisa konfirmasi</b>: <b>${sisaMin} menit lagi</b>` +
+        bodySection +
+        `\n\n⚠️ <i>Tiket ini belum dikonfirmasi di Ticket Operations.</i>`;
 
       try {
         await getBot().sendMessage(ALERT_CHAT_ID, warnText, { parse_mode: 'HTML' });
@@ -188,6 +215,10 @@ async function checkSlaConfirmation() {
           ticketId: t.ticket_id,
           severity: t.priority || t.severity,
           subject: t.subject,
+          sender: t.from,
+          channel: t.source,
+          receivedAt: startedAt,
+          body: t.body || t.summary,
           elapsedMin: elapsedMin,
           sisaMenit: sisaMin,
         }).catch(err => console.error('[SLA-Teams] Gagal kirim confirm warn:', err.message));
@@ -224,16 +255,35 @@ async function checkSlaConfirmation() {
     const reachedAlert = elapsedMin >= SLA_CONFIRM_MINUTES;
     const reachedWarn = elapsedMin >= SLA_CONFIRM_MINUTES - SLA_CONFIRM_WARN_REMAINING_MINUTES;
 
+    const dateStr = intake.received_at
+      ? new Date(intake.received_at).toLocaleString("id-ID", {
+          timeZone: "Asia/Jakarta",
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "-";
+    const bodyPreview = (intake.body_text || "").trim();
+    const bodySection = bodyPreview
+      ? `\n\n💬 <b>Cuplikan Pesan:</b>\n<i>${escapeTelegramHtml(bodyPreview.slice(0, 350))}...</i>`
+      : "";
+
     if (reachedAlert) {
       const alertText =
         `🚨 <b>SLA KONFIRMASI HABIS — KANDIDAT TIKET BELUM DIKONFIRMASI!</b>\n\n` +
-        `${sevEmoji} Severity  : <b>${severity}</b>\n` +
-        `🆔 Intake ID  : <code>${intake.id}</code>\n` +
-        `👤 Pengirim   : ${escapeTelegramHtml(intake.sender)}\n` +
-        `📌 Subjek     : ${escapeTelegramHtml(subject)}${taggedStr}\n` +
-        `⏱ Waktu tunggu: <b>${Math.round(elapsedMin)} menit</b> (batas: ${SLA_CONFIRM_MINUTES} menit)\n\n` +
-        `⚠️ Kandidat tiket ini belum dikonfirmasi di Ticket Operations selama <b>${SLA_CONFIRM_MINUTES} menit</b>.\n` +
-        `<i>Mohon segera pantau dan tindak lanjuti pada grup Ticket Operations.</i>`;
+        `🆔 <b>Intake ID</b>  : <code>${intake.id}</code>\n` +
+        `🕒 <b>Waktu</b>      : ${escapeTelegramHtml(dateStr)}\n` +
+        `📡 <b>Channel</b>    : ${escapeTelegramHtml(String(intake.source_channel || "Email").toUpperCase())}\n` +
+        `👤 <b>Pengirim</b>   : ${escapeTelegramHtml(intake.sender || "-")}\n` +
+        (taggedStr ? `🏷️ <b>Tagged PIC</b> : ${taggedStr}\n` : "") +
+        `📌 <b>Subjek</b>     : ${escapeTelegramHtml(subject)}\n` +
+        `${sevEmoji} <b>Severity</b>   : <b>${severity}</b>\n` +
+        `⏱ <b>Waktu tunggu</b>: <b>${Math.round(elapsedMin)} menit</b> (batas: ${SLA_CONFIRM_MINUTES} menit)\n` +
+        `⚠️ <b>Status</b>     : Pending Confirmation (Exceeded)` +
+        bodySection +
+        `\n\n⚠️ <i>Kandidat tiket ini belum dikonfirmasi di Ticket Operations selama ${SLA_CONFIRM_MINUTES} menit. Mohon segera pantau dan tindak lanjuti pada grup Ticket Operations.</i>`;
 
       try {
         await getBot().sendMessage(ALERT_CHAT_ID, alertText, { parse_mode: 'HTML' });
@@ -245,6 +295,11 @@ async function checkSlaConfirmation() {
           ticketId: `Intake #${intake.id}`,
           severity: severity,
           subject: subject,
+          sender: intake.sender,
+          channel: intake.source_channel,
+          receivedAt: intake.received_at,
+          body: intake.body_text,
+          taggedPersons: mentions,
           elapsedMin: elapsedMin,
         }).catch((err) => console.error('[SLA-Teams] Gagal kirim confirm alert:', err.message));
       } catch (err) {
@@ -265,13 +320,17 @@ async function checkSlaConfirmation() {
       const sisaMin = Math.max(0, Math.round(SLA_CONFIRM_MINUTES - elapsedMin));
       const warnText =
         `🔔 <b>ALERT — Sisa waktu Confirmation Intake tinggal ${sisaMin} menit!</b>\n\n` +
-        `${sevEmoji} Severity  : <b>${severity}</b>\n` +
-        `🆔 Intake ID  : <code>${intake.id}</code>\n` +
-        `👤 Pengirim   : ${escapeTelegramHtml(intake.sender)}\n` +
-        `📌 Subjek     : ${escapeTelegramHtml(subject)}${taggedStr}\n` +
-        `⏳ Sudah menunggu: <b>${Math.round(elapsedMin)} menit</b>\n` +
-        `⏱ Sisa konfirmasi: <b>${sisaMin} menit lagi</b>\n\n` +
-        `⚠️ Kandidat tiket belum dikonfirmasi di Ticket Operations.`;
+        `🆔 <b>Intake ID</b>  : <code>${intake.id}</code>\n` +
+        `🕒 <b>Waktu</b>      : ${escapeTelegramHtml(dateStr)}\n` +
+        `📡 <b>Channel</b>    : ${escapeTelegramHtml(String(intake.source_channel || "Email").toUpperCase())}\n` +
+        `👤 <b>Pengirim</b>   : ${escapeTelegramHtml(intake.sender || "-")}\n` +
+        (taggedStr ? `🏷️ <b>Tagged PIC</b> : ${taggedStr}\n` : "") +
+        `📌 <b>Subjek</b>     : ${escapeTelegramHtml(subject)}\n` +
+        `${sevEmoji} <b>Severity</b>   : <b>${severity}</b>\n` +
+        `⏳ <b>Sudah menunggu</b>: <b>${Math.round(elapsedMin)} menit</b>\n` +
+        `⏱ <b>Sisa konfirmasi</b>: <b>${sisaMin} menit lagi</b>` +
+        bodySection +
+        `\n\n⚠️ <i>Kandidat tiket belum dikonfirmasi di Ticket Operations.</i>`;
 
       try {
         await getBot().sendMessage(ALERT_CHAT_ID, warnText, { parse_mode: 'HTML' });
@@ -283,6 +342,11 @@ async function checkSlaConfirmation() {
           ticketId: `Intake #${intake.id}`,
           severity: severity,
           subject: subject,
+          sender: intake.sender,
+          channel: intake.source_channel,
+          receivedAt: intake.received_at,
+          body: intake.body_text,
+          taggedPersons: mentions,
           elapsedMin: elapsedMin,
           sisaMenit: sisaMin,
         }).catch((err) => console.error('[SLA-Teams] Gagal kirim confirm warn:', err.message));
