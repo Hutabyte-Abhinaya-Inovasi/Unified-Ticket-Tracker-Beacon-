@@ -21,23 +21,37 @@ async function safeSendCandidate(raw) {
   processingIntakeIds.add(idStr);
 
   try {
+    // Ambil data lengkap langsung dari database berdasarkan ID
+    // agar body_text dan raw_payload tidak hilang/terpotong akibat limitasi Supabase Realtime WebSocket / Postgres TOAST!
+    let activeRaw = raw;
+    if (raw.id) {
+      try {
+        const { data: dbRecord } = await supabase
+          .from("intake_message")
+          .select("*")
+          .eq("id", raw.id)
+          .single();
+        if (dbRecord) activeRaw = dbRecord;
+      } catch (_) {}
+    }
+
     // 1. Kirim ke Telegram (Beacon Ticket Operations)
-    await sendRawIntakeCandidate(raw);
+    await sendRawIntakeCandidate(activeRaw);
 
     // 2. Kirim juga ke Microsoft Teams Channel
-    const payload = raw.raw_payload || {};
-    const body = raw.body_text || "";
+    const payload = activeRaw.raw_payload || {};
+    const body = activeRaw.body_text || "";
     const mentions = payload.mentions || extractEmailMentions(body, payload.html);
-    const subject = payload.subject || raw.subject || "(No Subject)";
+    const subject = payload.subject || activeRaw.subject || "(No Subject)";
 
     await sendTeamsCandidateAlert({
-      intakeId: raw.id,
+      intakeId: activeRaw.id,
       subject: subject,
-      sender: raw.sender,
+      sender: activeRaw.sender,
       body: body,
       taggedPersons: mentions,
-      receivedAt: raw.received_at,
-      channel: raw.source_channel || "email",
+      receivedAt: activeRaw.received_at,
+      channel: activeRaw.source_channel || "email",
     }).catch((err) => console.error("[Teams-Intake] Gagal kirim kandidat ke Teams:", err.message));
   } finally {
     // Biarkan ID berada di set selama 60 detik untuk mencegah duplikasi akibat race condition

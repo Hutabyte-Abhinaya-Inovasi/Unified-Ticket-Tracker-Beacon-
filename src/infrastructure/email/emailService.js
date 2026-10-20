@@ -190,16 +190,27 @@ function fetchNewEmails() {
 
           const sender = parsed.from?.text || parsed.from?.value?.[0]?.name || parsed.from?.value?.[0]?.address || "Unknown";
 
-          // Salin parsed tanpa buffer biner attachment agar database tidak membengkak
-          const sanitizedParsed = { ...parsed };
-          if (Array.isArray(sanitizedParsed.attachments)) {
-            sanitizedParsed.attachments = sanitizedParsed.attachments.map(att => ({
-              filename: att.filename,
-              contentType: att.contentType,
-              size: att.size,
-              cid: att.cid,
-            }));
-          }
+          // Salin properti penting dari ParsedMail tanpa buffer biner attachment agar database tidak membengkak
+          const sanitizedAttachments = (parsed.attachments || []).map(att => ({
+            filename: att.filename,
+            contentType: att.contentType,
+            size: att.size,
+            cid: att.cid,
+          }));
+
+          const cleanPayload = {
+            messageId: parsed.messageId,
+            subject: parsed.subject || "(No Subject)",
+            from: parsed.from,
+            to: parsed.to,
+            cc: parsed.cc,
+            date: parsed.date,
+            text: parsed.text,
+            html: parsed.html,
+            mentions: mentions,
+            has_mentions: mentions.length > 0,
+            attachments: sanitizedAttachments,
+          };
 
           await saveRawIntakeMessage({
             source_channel: "email",
@@ -212,11 +223,7 @@ function fetchNewEmails() {
               count: parsed.attachments?.length || 0,
               files: (parsed.attachments || []).map(a => a.filename).filter(Boolean),
             },
-            raw_payload: {
-              ...sanitizedParsed,
-              mentions: mentions,
-              has_mentions: mentions.length > 0,
-            },
+            raw_payload: cleanPayload,
             idempotency_key: `email-${parsed.messageId || currentUid}`,
           });
 
