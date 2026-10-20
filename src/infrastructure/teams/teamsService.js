@@ -181,3 +181,85 @@ export async function sendTeamsTicketAlert({
 
   return await sendTeamsAdaptiveCard(cardBody, `Tiket Baru: ${ticketId}`);
 }
+
+/**
+ * Format dan kirim notifikasi Kandidat Tiket Masuk (Perlu Konfirmasi) ke Microsoft Teams.
+ */
+export async function sendTeamsCandidateAlert({
+  intakeId,
+  subject = "-",
+  sender = "-",
+  body = "",
+  taggedPersons = [],
+  receivedAt = null,
+  channel = "email",
+}) {
+  const hasTagged = Array.isArray(taggedPersons) && taggedPersons.length > 0;
+  const taggedText = hasTagged
+    ? taggedPersons.map((p) => (p.email ? `@${p.name} (${p.email})` : `@${p.name}`)).join(", ")
+    : null;
+
+  const headerTitle = hasTagged
+    ? "🚨 KANDIDAT TIKET PRIORITAS (TAGGED PIC) — PERLU KONFIRMASI"
+    : "📥 KANDIDAT TIKET BARU — PERLU KONFIRMASI";
+  const headerColor = hasTagged ? "Attention" : "Warning";
+
+  const dateStr = receivedAt
+    ? new Date(receivedAt).toLocaleString("id-ID", {
+        timeZone: "Asia/Jakarta",
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "-";
+
+  const facts = [
+    { title: "🆔 Intake ID:", value: String(intakeId || "-") },
+    { title: "📡 Channel:", value: String(channel).toUpperCase() },
+    { title: "👤 Pengirim:", value: sender || "-" },
+    { title: "📝 Subjek:", value: subject || "-" },
+    { title: "🕒 Waktu:", value: dateStr },
+  ];
+
+  if (taggedText) {
+    facts.push({ title: "🏷️ Tagged PIC:", value: taggedText });
+    facts.push({ title: "⚠️ Severity:", value: "HIGH (Priority Tagged Person)" });
+  } else {
+    facts.push({ title: "⚠️ Severity:", value: "Pending Confirmation" });
+  }
+
+  facts.push({ title: "⏳ Batas Konfirmasi:", value: "15 Menit (SLA Konfirmasi)" });
+
+  const cardBody = [
+    {
+      type: "TextBlock",
+      text: headerTitle,
+      weight: "Bolder",
+      size: "Medium",
+      color: headerColor,
+    },
+    {
+      type: "TextBlock",
+      text: `Pesan baru masuk dan membutuhkan **konfirmasi operator** sebelum diproses menjadi tiket.`,
+      wrap: true,
+      spacing: "Small",
+    },
+    {
+      type: "FactSet",
+      facts: facts,
+      spacing: "Medium",
+    },
+    {
+      type: "TextBlock",
+      text: `**Cuplikan Pesan:**\n${String(body || "").slice(0, 300)}...`,
+      wrap: true,
+      spacing: "Small",
+      isSubtle: true,
+    },
+  ];
+
+  return await sendTeamsAdaptiveCard(cardBody, `Kandidat Tiket #${intakeId}`);
+}
+

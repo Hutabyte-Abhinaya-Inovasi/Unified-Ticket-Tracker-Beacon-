@@ -2,6 +2,7 @@ import Imap from "imap";
 import { simpleParser } from "mailparser";
 import { env } from "../../config/env.js";
 import { saveRawIntakeMessage } from "../../database/supabase.js";
+import { extractEmailMentions } from "./emailHelper.js";
 
 const imapConfig = {
   user: env.EMAIL_USER,
@@ -168,10 +169,16 @@ function fetchNewEmails() {
         try {
           const parsed = await simpleParser(stream);
 
+          const bodyText = getEmailBody(parsed);
+          const mentions = extractEmailMentions(bodyText, parsed.html);
+
           console.log("===== EMAIL PARSED =====");
           console.log("Subject :", parsed.subject);
           console.log("From    :", parsed.from?.text);
           console.log("Text    :", parsed.text);
+          if (mentions.length > 0) {
+            console.log("🏷️ Tagged PICs:", mentions.map(m => m.name).join(", "));
+          }
           console.log("========================");
 
           console.log("📨 EMAIL BARU DITERIMA");
@@ -184,11 +191,15 @@ function fetchNewEmails() {
             sender: sender,
             thread_ref: parsed.messageId || null,
             received_at: parsed.date || new Date(),
-            body_text: getEmailBody(parsed),
+            body_text: bodyText,
             attachments: {
               count: parsed.attachments?.length || 0,
             },
-            raw_payload: parsed,
+            raw_payload: {
+              ...parsed,
+              mentions: mentions,
+              has_mentions: mentions.length > 0,
+            },
             idempotency_key: `email-${parsed.messageId || currentUid}`,
           });
 

@@ -19,8 +19,10 @@ import { sendTeamsSlaAlert } from '../teams/teamsService.js';
 import {
   getTicketsNeedingSlaCheck,
   getTicketsNeedingConfirmationCheck,
+  getPendingIntakesNeedingConfirmationCheck,
   markSlaFlag,
   markSlaConfirmFlag,
+  markIntakeSlaConfirmFlag,
   updateTicket,
 } from '../../database/supabase.js';
 
@@ -191,6 +193,101 @@ async function checkSlaConfirmation() {
         }).catch(err => console.error('[SLA-Teams] Gagal kirim confirm warn:', err.message));
       } catch (err) {
         console.error(`[SLA-Konfirmasi] Gagal kirim WARN tiket ${t.ticket_id}:`, err.message);
+      }
+    }
+  }
+
+  // ── Pemeriksaan intake mentah (intake_message) yang masih berstatus pending ──
+  const pendingIntakes = await getPendingIntakesNeedingConfirmationCheck();
+  if (pendingIntakes.length > 0) {
+    console.log(`[SLA-Konfirmasi] Memeriksa ${pendingIntakes.length} intake pending`);
+  }
+
+  for (const intake of pendingIntakes) {
+    const rawPayload = intake.raw_payload || {};
+    if (rawPayload.sla_confirm_alerted) continue;
+
+    const startedAt = intake.received_at;
+    const startedAtMs = new Date(startedAt).getTime();
+    if (!Number.isFinite(startedAtMs)) continue;
+
+    const elapsedMin = (Date.now() - startedAtMs) / 60000;
+    const mentions = rawPayload.mentions || [];
+    const hasMentions = mentions.length > 0;
+    const severity = hasMentions ? 'HIGH' : 'MEDIUM';
+    const sevEmoji = SEVERITY_EMOJI[severity] || '🟡';
+    const subject = rawPayload.subject || '(No Subject)';
+    const taggedStr = hasMentions
+      ? `\n🏷️ Tagged PIC : ${mentions.map((m) => `@${m.name}`).join(', ')}`
+      : '';
+
+    const reachedAlert = elapsedMin >= SLA_CONFIRM_MINUTES;
+    const reachedWarn = elapsedMin >= SLA_CONFIRM_MINUTES - SLA_CONFIRM_WARN_REMAINING_MINUTES;
+
+    if (reachedAlert) {
+      const alertText =
+        `🚨 <b>SLA KONFIRMASI HABIS — KANDIDAT TIKET BELUM DIKONFIRMASI!</b>\n\n` +
+        `${sevEmoji} Severity  : <b>${severity}</b>\n` +
+        `🆔 Intake ID  : <code>${intake.id}</code>\n` +
+        `👤 Pengirim   : ${escapeTelegramHtml(intake.sender)}\n` +
+        `📌 Subjek     : ${escapeTelegramHtml(subject)}${taggedStr}\n` +
+        `⏱ Waktu tunggu: <b>${Math.round(elapsedMin)} menit</b> (batas: ${SLA_CONFIRM_MINUTES} menit)\n\n` +
+        `⚠️ Kandidat tiket ini belum dikonfirmasi di Ticket Operations selama <b>${SLA_CONFIRM_MINUTES} menit</b>.\n` +
+        `<i>Mohon segera pantau dan tindak lanjuti pada grup Ticket Operations.</i>`;
+
+      try {
+        await getBot().sendMessage(ALERT_CHAT_ID, alertText, { parse_mode: 'HTML' });
+        await markIntakeSlaConfirmFlag(intake.id, 'alert');
+        console.log(`[SLA-Konfirmasi] ALERT terkirim untuk Intake ${intake.id} (${Math.round(elapsedMin)} menit)`);
+
+        sendTeamsSlaAlert({
+          type: 'confirm_alert',
+          ticketId: `Intake #${intake.id}`,
+          severity: severity,
+          subject: subject,
+          elapsedMin: elapsedMin,
+        }).catch((err) => console.error('[SLA-Teams] Gagal kirim confirm alert:', err.message));
+      } catch (err) {
+        console.error(`[SLA-Konfirmasi] Gagal kirim ALERT intake ${intake.id}:`, err.message);
+      }
+      continue;
+    }
+
+    if (reachedWarn) {
+      const lastWarnedAt = rawPayload.sla_confirm_last_warned_at
+        ? new Date(rawPayload.sla_confirm_last_warned_at).getTime()
+        : null;
+      const warnIntervalElapsed =
+        !Number.isFinite(lastWarnedAt) ||
+        Date.now() - lastWarnedAt >= SLA_CONFIRM_WARN_REPEAT_MINUTES * 60_000;
+      if (!warnIntervalElapsed) continue;
+
+      const sisaMin = Math.max(0, Math.round(SLA_CONFIRM_MINUTES - elapsedMin));
+      const warnText =
+        `🔔 <b>ALERT — Sisa waktu Confirmation Intake tinggal ${sisaMin} menit!</b>\n\n` +
+        `${sevEmoji} Severity  : <b>${severity}</b>\n` +
+        `🆔 Intake ID  : <code>${intake.id}</code>\n` +
+        `👤 Pengirim   : ${escapeTelegramHtml(intake.sender)}\n` +
+        `📌 Subjek     : ${escapeTelegramHtml(subject)}${taggedStr}\n` +
+        `⏳ Sudah menunggu: <b>${Math.round(elapsedMin)} menit</b>\n` +
+        `⏱ Sisa konfirmasi: <b>${sisaMin} menit lagi</b>\n\n` +
+        `⚠️ Kandidat tiket belum dikonfirmasi di Ticket Operations.`;
+
+      try {
+        await getBot().sendMessage(ALERT_CHAT_ID, warnText, { parse_mode: 'HTML' });
+        await markIntakeSlaConfirmFlag(intake.id, 'warn');
+        console.log(`[SLA-Konfirmasi] WARN terkirim untuk Intake ${intake.id} (sisa ${sisaMin} menit)`);
+
+        sendTeamsSlaAlert({
+          type: 'confirm_warn',
+          ticketId: `Intake #${intake.id}`,
+          severity: severity,
+          subject: subject,
+          elapsedMin: elapsedMin,
+          sisaMenit: sisaMin,
+        }).catch((err) => console.error('[SLA-Teams] Gagal kirim confirm warn:', err.message));
+      } catch (err) {
+        console.error(`[SLA-Konfirmasi] Gagal kirim WARN intake ${intake.id}:`, err.message);
       }
     }
   }

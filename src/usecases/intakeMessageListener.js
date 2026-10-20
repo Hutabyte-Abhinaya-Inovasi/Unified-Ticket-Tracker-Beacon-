@@ -1,5 +1,7 @@
 import { supabase } from "../database/supabase.js";
 import { sendRawIntakeCandidate } from "../infrastructure/telegram/telegramService.js";
+import { sendTeamsCandidateAlert } from "../infrastructure/teams/teamsService.js";
+import { extractEmailMentions } from "../infrastructure/email/emailHelper.js";
 
 const processingIntakeIds = new Set();
 
@@ -19,7 +21,24 @@ async function safeSendCandidate(raw) {
   processingIntakeIds.add(idStr);
 
   try {
+    // 1. Kirim ke Telegram (Beacon Ticket Operations)
     await sendRawIntakeCandidate(raw);
+
+    // 2. Kirim juga ke Microsoft Teams Channel
+    const payload = raw.raw_payload || {};
+    const body = raw.body_text || "";
+    const mentions = payload.mentions || extractEmailMentions(body, payload.html);
+    const subject = payload.subject || raw.subject || "(No Subject)";
+
+    await sendTeamsCandidateAlert({
+      intakeId: raw.id,
+      subject: subject,
+      sender: raw.sender,
+      body: body,
+      taggedPersons: mentions,
+      receivedAt: raw.received_at,
+      channel: raw.source_channel || "email",
+    }).catch((err) => console.error("[Teams-Intake] Gagal kirim kandidat ke Teams:", err.message));
   } finally {
     // Biarkan ID berada di set selama 60 detik untuk mencegah duplikasi akibat race condition
     setTimeout(() => processingIntakeIds.delete(idStr), 60000);

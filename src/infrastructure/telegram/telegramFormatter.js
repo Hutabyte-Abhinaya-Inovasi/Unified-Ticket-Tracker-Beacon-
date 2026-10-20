@@ -1,3 +1,5 @@
+import { extractEmailMentions } from '../email/emailHelper.js';
+
 function escapeHTML(text = "") {
     return String(text)
         .replace(/&/g, "&amp;")
@@ -61,6 +63,12 @@ export function formatCandidateTicket(raw = {}) {
     const subjectVal = email.subject ?? email.group_name ?? raw.subject ?? raw.group_name ?? "(No Subject)";
     const bodyVal = raw.body_text ?? raw.body ?? "";
 
+    // Deteksi mention / orang yang di-tag (@nama)
+    const mentions = email.mentions || extractEmailMentions(bodyVal, email.html);
+    const taggedStr = mentions && mentions.length > 0
+        ? mentions.map((m) => (m.email ? `@${m.name} (${m.email})` : `@${m.name}`)).join(", ")
+        : null;
+
     return (
     `📥 <b>NEW TICKET CANDIDATE</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
@@ -75,6 +83,7 @@ export function formatCandidateTicket(raw = {}) {
         (typeof senderVal === "string" ? senderVal : "-") ||
         "-"
     )}\n` +
+    (taggedStr ? `🏷️ <b>Tagged PIC</b>          : <b>${escapeHTML(taggedStr)}</b>\n` : "") +
     `🏷️ <b>Subject</b>              : ${escapeHTML(subjectVal)}\n\n` +
 
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -82,7 +91,7 @@ export function formatCandidateTicket(raw = {}) {
 
     `🖥️ <b>Project</b>              : Pending Operator Confirmation\n` +
     `🗂️ <b>Category</b>             : Pending Operator Confirmation\n` +
-    `⚠️ <b>Severity</b>             : Pending Operator Confirmation\n` +
+    `⚠️ <b>Severity</b>             : ${taggedStr ? "<b>HIGH (Priority Tagged Person)</b>" : "Pending Operator Confirmation"}\n` +
     `🔄 <b>Status</b>               : Pending Confirmation\n` +
     `⏳ <b>Confirmation Deadline</b>: 15 minutes\n\n` +
 

@@ -28,7 +28,7 @@ export const env = {
   // Grup Beacon SLA & Escalation (merah): tujuan tiket final / SLA
   TG_BEACON_CHAT_ID: process.env.TG_BEACON_CHAT_ID || "-1003753882093",
   // Grup Beacon Ticket Operations (biru): kandidat & pre-konfirmasi
-  TG_UTT_CHAT_ID: process.env.TG_UTT_CHAT_ID || "-5546265953",
+  TG_UTT_CHAT_ID: process.env.TG_UTT_CHAT_ID || "-1004413403284",
 
   // ClickUp integration (opsional)
   CLICKUP_API_KEY: process.env.CLICKUP_API_KEY || null,

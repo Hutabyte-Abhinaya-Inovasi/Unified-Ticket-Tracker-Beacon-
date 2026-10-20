@@ -1161,3 +1161,51 @@ export async function markSlaConfirmFlag(ticketId, level) {
   if (error) console.error(`Gagal set SLA Konfirmasi flag [${level}] tiket ${ticketId}:`, error.message);
   return !error;
 }
+
+// Ambil pesan mentah (intake_message) yang masih status pending untuk pengecekan SLA konfirmasi
+export async function getPendingIntakesNeedingConfirmationCheck() {
+  try {
+    const { data, error } = await supabase
+      .from('intake_message')
+      .select('id, source_channel, sender, body_text, raw_payload, received_at, status')
+      .eq('status', 'pending')
+      .order('received_at', { ascending: true });
+
+    if (error) {
+      console.error('Error fetching pending intakes for SLA check:', error.message);
+      return [];
+    }
+    return data || [];
+  } catch (err) {
+    console.error('Unexpected error in getPendingIntakesNeedingConfirmationCheck:', err.message);
+    return [];
+  }
+}
+
+// Update flag SLA konfirmasi di dalam raw_payload intake_message
+export async function markIntakeSlaConfirmFlag(intakeId, level) {
+  try {
+    const { data: intake } = await supabase
+      .from('intake_message')
+      .select('raw_payload')
+      .eq('id', intakeId)
+      .single();
+
+    const currentPayload = intake?.raw_payload || {};
+    const updatePayload = level === 'warn'
+      ? { ...currentPayload, sla_confirm_warned: true, sla_confirm_last_warned_at: new Date().toISOString() }
+      : { ...currentPayload, sla_confirm_alerted: true };
+
+    const { error } = await supabase
+      .from('intake_message')
+      .update({ raw_payload: updatePayload })
+      .eq('id', intakeId);
+
+    if (error) console.error(`Gagal set SLA Confirmed flag intake ${intakeId}:`, error.message);
+    return !error;
+  } catch (err) {
+    console.error(`Unexpected error in markIntakeSlaConfirmFlag:`, err.message);
+    return false;
+  }
+}
+

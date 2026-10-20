@@ -3329,14 +3329,32 @@ export async function sendRawIntakeCandidate(raw) {
     },
   };
 
-  const sent = await botInstance.sendMessage(
-    ticketOperationsChatId,
-    messageText,
-    {
-      parse_mode: "HTML",
-      ...keyboard,
+  let sent;
+  try {
+    sent = await botInstance.sendMessage(
+      ticketOperationsChatId,
+      messageText,
+      {
+        parse_mode: "HTML",
+        ...keyboard,
+      }
+    );
+  } catch (err) {
+    const migratedId = err.response?.body?.parameters?.migrate_to_chat_id || env.TG_BEACON_CHAT_ID || env.TG_CHAT_ID;
+    if (migratedId && (err.response?.body?.parameters?.migrate_to_chat_id || err.message?.includes("upgraded to a supergroup"))) {
+      console.warn(`[Raw Intake] Chat di-upgrade ke supergroup (${migratedId}). Mengirim ulang kandidat...`);
+      sent = await botInstance.sendMessage(
+        migratedId,
+        messageText,
+        {
+          parse_mode: "HTML",
+          ...keyboard,
+        }
+      );
+    } else {
+      throw err;
     }
-  );
+  }
 
   if (sent?.message_id && raw.id) {
     try {
