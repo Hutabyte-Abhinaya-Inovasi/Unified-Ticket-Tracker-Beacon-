@@ -1165,10 +1165,13 @@ export async function markSlaConfirmFlag(ticketId, level) {
 // Ambil pesan mentah (intake_message) yang masih status pending untuk pengecekan SLA konfirmasi
 export async function getPendingIntakesNeedingConfirmationCheck() {
   try {
+    // Batasi pengecekan SLA konfirmasi (15 menit) ke intake dalam 24 jam terakhir agar query cepat dan tidak timeout
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const { data, error } = await supabase
       .from('intake_message')
       .select('id, source_channel, sender, body_text, raw_payload, received_at, status')
       .eq('status', 'pending')
+      .gte('received_at', cutoff)
       .order('received_at', { ascending: true });
 
     if (error) {

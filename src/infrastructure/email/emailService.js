@@ -87,11 +87,16 @@ function openInbox() {
 
     console.log("📬 INBOX opened");
 
-    // Catat UID terakhir di mailbox agar tidak memproses email lama saat startup
-    lastSeenUid = box.uidnext - 1;
+    // Catat UID terakhir di mailbox
+    const currentMaxUid = Math.max(0, box.uidnext - 1);
+    // Mulai cek 10 UID terakhir agar email yang masuk saat server restart tidak terlewat
+    lastSeenUid = Math.max(1, currentMaxUid - 10);
 
-    console.log(`📌 Mulai listen setelah UID: ${lastSeenUid}`);
-    console.log("👂 Menunggu email BARU...");
+    console.log(`📌 Mulai listen dari UID: ${lastSeenUid} (UID next: ${box.uidnext})`);
+    console.log("👂 Memeriksa dan menunggu email BARU...");
+
+    // Cek email baru yang mungkin masuk saat restart
+    fetchNewEmails();
 
     imap.on("mail", () => {
       fetchNewEmails();
@@ -185,6 +190,17 @@ function fetchNewEmails() {
 
           const sender = parsed.from?.text || parsed.from?.value?.[0]?.name || parsed.from?.value?.[0]?.address || "Unknown";
 
+          // Salin parsed tanpa buffer biner attachment agar database tidak membengkak
+          const sanitizedParsed = { ...parsed };
+          if (Array.isArray(sanitizedParsed.attachments)) {
+            sanitizedParsed.attachments = sanitizedParsed.attachments.map(att => ({
+              filename: att.filename,
+              contentType: att.contentType,
+              size: att.size,
+              cid: att.cid,
+            }));
+          }
+
           await saveRawIntakeMessage({
             source_channel: "email",
             source_ref: parsed.messageId || `imap-${currentUid}`,
@@ -194,9 +210,10 @@ function fetchNewEmails() {
             body_text: bodyText,
             attachments: {
               count: parsed.attachments?.length || 0,
+              files: (parsed.attachments || []).map(a => a.filename).filter(Boolean),
             },
             raw_payload: {
-              ...parsed,
+              ...sanitizedParsed,
               mentions: mentions,
               has_mentions: mentions.length > 0,
             },

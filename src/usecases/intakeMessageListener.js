@@ -51,17 +51,19 @@ async function processPendingIntakesOnStartup() {
       .from("intake_message")
       .select("id, source_channel, sender, raw_payload, body_text, received_at, ticket_id, status")
       .eq("status", "pending")
-      .order("id", { ascending: true })
-      .limit(15);
+      .order("id", { ascending: false })
+      .limit(50);
 
     if (error) {
       console.warn("⚠️ Gagal mengambil pending intake saat startup:", error.message);
       return;
     }
 
-    const unsentIntakes = (pendingIntakes || []).filter(
-      raw => !raw.raw_payload?.candidate_sent && !processingIntakeIds.has(String(raw.id))
-    );
+    const unsentIntakes = (pendingIntakes || [])
+      .filter(
+        raw => !raw.raw_payload?.candidate_sent && !processingIntakeIds.has(String(raw.id))
+      )
+      .sort((a, b) => a.id - b.id);
 
     if (unsentIntakes.length > 0) {
       console.log(`\n📥 Ditemukan ${unsentIntakes.length} intake pending yang belum terkirim ke Telegram. Memproses...`);
