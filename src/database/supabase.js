@@ -778,6 +778,26 @@ export const supabase = {
             whereClauses.push(`"${col}" <= $${params.length}`);
             return queryObj;
           },
+          is(col, val) {
+            if (val === null) {
+              whereClauses.push(`"${col}" IS NULL`);
+            } else {
+              params.push(val);
+              whereClauses.push(`"${col}" = $${params.length}`);
+            }
+            return queryObj;
+          },
+          not(col, operator, val) {
+            if (operator === "is" && val === null) {
+              whereClauses.push(`"${col}" IS NOT NULL`);
+            } else if (operator === "in") {
+              whereClauses.push(`"${col}" NOT IN ${val}`);
+            } else {
+              params.push(val);
+              whereClauses.push(`"${col}" <> $${params.length}`);
+            }
+            return queryObj;
+          },
           or(clauseStr) {
             return queryObj;
           },
@@ -799,6 +819,7 @@ export const supabase = {
               const res = await pgPool.query(sql, params);
               resolve({ data: res.rows, error: null, count: res.rows.length });
             } catch (err) {
+              console.error("❌ Postgres Query Error in AI helper:", err.message);
               resolve({ data: null, error: err, count: 0 });
             }
           },
