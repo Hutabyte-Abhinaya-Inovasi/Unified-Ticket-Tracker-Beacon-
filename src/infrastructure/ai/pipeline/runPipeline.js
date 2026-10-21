@@ -33,6 +33,11 @@ const KNOWLEDGE_TOOLS = new Set([
   "search_outline_knowledge",
 ]);
 
+const INTAKE_TOOLS = new Set([
+  "query_intake_messages",
+  "confirm_intake_ticket",
+]);
+
 /**
  * Menjalankan pipeline sesuai jenis tool.
  *
@@ -136,6 +141,28 @@ export async function runPipeline(
 
     return {
       ...finalContext,
+      pipeline_duration_ms: durationMs,
+    };
+  }
+
+  // ==================== INTAKE & ACTION TOOLS ====================
+  if (INTAKE_TOOLS.has(toolName)) {
+    const durationMs = Date.now() - startedAt;
+    return {
+      tool: toolName,
+      arguments: args,
+      data: rawResult,
+      pipeline_meta: {
+        pipeline_type: "intake_direct",
+        validation: {
+          valid: true,
+          is_empty: rawResult?.count === 0,
+          is_error: !!rawResult?.error,
+          issues: [],
+        },
+      },
+      guidance_for_main_model:
+        "Data pesan masuk / intake berasal langsung dari database PostgreSQL. Silakan jelaskan kepada pengguna secara informatif.",
       pipeline_duration_ms: durationMs,
     };
   }

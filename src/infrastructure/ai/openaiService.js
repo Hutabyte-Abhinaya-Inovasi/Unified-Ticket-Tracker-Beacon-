@@ -174,32 +174,56 @@ const tools = [
   {
     type: "function",
     function: {
-      name: "search_outline_knowledge",
+      name: "query_intake_messages",
       description:
-        "Mencari dokumentasi internal dari Outline, termasuk SOP, runbook, troubleshooting, " +
-        "prosedur akses, informasi project, langkah operasional, dan dokumentasi aplikasi. " +
-        "Gunakan untuk pertanyaan cara, SOP, prosedur, panduan, troubleshooting, akses server, " +
-        "penjelasan project, atau solusi teknis. Jangan gunakan untuk status aktual atau jumlah tiket.",
+        "Membaca daftar pesan masuk mentah / kandidat tiket dari tabel intake_message (email, WA, Telegram). " +
+        "Gunakan tool ini ketika pengguna menanyakan tentang 'intake message', 'pesan masuk hari ini', " +
+        "'kandidat tiket baru yang masuk', atau 'email/chat yang belum diproses'.",
       parameters: {
         type: "object",
         properties: {
-          query: {
+          status: {
             type: "string",
-            description:
-              "Pertanyaan atau kata kunci yang spesifik, misalnya 'cara akses APH server BRN'.",
+            enum: ["pending", "processed", "threaded", "ignored", "all"],
+            description: "Status intake message. Default 'all' jika menanyakan seluruh pesan hari ini.",
+          },
+          source_channel: {
+            type: "string",
+            enum: ["email", "wa_group", "wa_dm", "telegram", "teams"],
+            description: "Filter platform sumber.",
           },
           limit: {
             type: "integer",
             minimum: 1,
-            maximum: 5,
-            description: "Jumlah maksimum dokumen; default 3.",
-          },
-          collection_id: {
-            type: "string",
-            description: "Opsional: batasi pencarian pada satu collection Outline.",
+            maximum: 50,
+            description: "Jumlah pesan yang diambil (default 10).",
           },
         },
-        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "confirm_intake_ticket",
+      description:
+        "Mengonfirmasi satu kandidat pesan masuk (intake_message) menjadi tiket resmi In Progress " +
+        "di tabel Unified_Ticket_Tracker dan ClickUp. Gunakan tool ini jika pengguna meminta " +
+        "untuk 'konfirmasi tiket', 'jadikan tiket', atau 'proses intake [id]'.",
+      parameters: {
+        type: "object",
+        properties: {
+          intake_id: {
+            type: "integer",
+            description: "ID numerik dari intake_message yang ingin dikonfirmasi.",
+          },
+          confirmed_by: {
+            type: "string",
+            description: "Nama orang yang meminta konfirmasi (misal: 'Samuel' atau nama user).",
+          },
+        },
+        required: ["intake_id"],
         additionalProperties: false,
       },
     },
@@ -518,6 +542,50 @@ async function executeTool(toolCall) {
         });
         break;
 
+      case "query_intake_messages": {
+        const { pgPool } = await import("../../database/postgres.js");
+        let sql = `SELECT id, source_channel, source_ref, sender, status, ticket_id, body_text, received_at 
+                   FROM public.intake_message`;
+        const params = [];
+        const where = [];
+
+        if (args.status && args.status !== "all") {
+          params.push(args.status);
+          where.push(`status = $${params.length}`);
+        }
+        if (args.source_channel) {
+          params.push(args.source_channel);
+          where.push(`source_channel = $${params.length}`);
+        }
+
+        if (where.length > 0) {
+          sql += ` WHERE ${where.join(" AND ")}`;
+        }
+        sql += ` ORDER BY received_at DESC LIMIT $${params.length + 1}`;
+        params.push(args.limit || 10);
+
+        const res = await pgPool.query(sql, params);
+        rawResult = {
+          count: res.rows.length,
+          messages: res.rows.map(r => ({
+            id: r.id,
+            source: r.source_channel,
+            sender: r.sender,
+            status: r.status,
+            ticket_id: r.ticket_id,
+            snippet: (r.body_text || "").substring(0, 150),
+            received_at: r.received_at,
+          })),
+        };
+        break;
+      }
+
+      case "confirm_intake_ticket": {
+        const { confirmIntakeAsTicket } = await import("../../database/postgres.js");
+        rawResult = await confirmIntakeAsTicket(args.intake_id, args.confirmed_by || "User");
+        break;
+      }
+
       default:
         rawResult = {
           error:
@@ -578,7 +646,11 @@ async function chatWithAI(userInput, context = "") {
   const messages = [
     {
       role: "system",
-      content: `Anda adalah AI Assistant "Beacon", asisten ITSM yang cerdas, sopan, dan terhubung dengan data tiket di Supabase serta dokumentasi internal di Outline.
+      content: `Anda adalah AI Assistant "Beacon" (Hutabot AI), asisten ITSM cerdas yang terhubung dengan database PostgreSQL tiket (Unified_Ticket_Tracker dan intake_message) serta Outline.
+
+- Jika ditanya tentang 'intake message', pesan masuk, atau email hari ini, WAJIB gunakan tool \`query_intake_messages\`.
+- Jika diminta mengonfirmasi/membuat tiket dari intake, gunakan tool \`confirm_intake_ticket\`.
+- Jika ditanya tiket umum, gunakan tool \`query_tickets\`.
 
 ### Informasi Waktu Saat Ini (WAJIB DIPAKAI, JANGAN GUNAKAN TANGGAL LAIN)
 - Sekarang: ${readable}, pukul ${time} WIB
