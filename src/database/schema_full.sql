@@ -204,27 +204,47 @@ ALTER TABLE public.whatsapp_auth            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.teams_routing_rule       ENABLE ROW LEVEL SECURITY;
 
 
--- ── 7. Realtime ───────────────────────────────────────────────
--- WAJIB: intakeMessageListener & clickupListener subscribe ke INSERT.
--- Tanpa ini kandidat tiket tidak akan pernah muncul di Telegram.
-DO $$
+-- ── 7. Native PostgreSQL Realtime (LISTEN / NOTIFY) ─────────────
+-- Triggers untuk notifikasi real-time ke listener Node.js (intakeMessageListener, teamsListener, clickupListener)
+CREATE OR REPLACE FUNCTION notify_intake_message_change()
+RETURNS TRIGGER AS $$
 BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_publication_tables
-    WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'intake_message'
-  ) THEN
-    ALTER PUBLICATION supabase_realtime ADD TABLE public.intake_message;
-  END IF;
+  PERFORM pg_notify('intake_message_events', json_build_object(
+    'id', NEW.id,
+    'ticket_id', NEW.ticket_id,
+    'source_channel', NEW.source_channel,
+    'sender', NEW.sender,
+    'status', NEW.status
+  )::text);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
 
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_publication_tables
-    WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'Unified_Ticket_Tracker'
-  ) THEN
-    ALTER PUBLICATION supabase_realtime ADD TABLE public."Unified_Ticket_Tracker";
-  END IF;
-END $$;
+DROP TRIGGER IF EXISTS trg_intake_message_notify ON public.intake_message;
+CREATE TRIGGER trg_intake_message_notify
+AFTER INSERT ON public.intake_message
+FOR EACH ROW EXECUTE FUNCTION notify_intake_message_change();
 
+CREATE OR REPLACE FUNCTION notify_utt_change()
+RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM pg_notify('Unified_Ticket_Tracker_events', json_build_object(
+    'id', NEW.id,
+    'ticket_id', NEW.ticket_id,
+    'subject', NEW.subject,
+    'severity', NEW.severity,
+    'priority', NEW.priority,
+    'project', NEW.project,
+    'source_channel', NEW.source,
+    'sender', NEW."from",
+    'summary', LEFT(COALESCE(NEW.summary, ''), 500)
+  )::text);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
 
--- ── Verifikasi ────────────────────────────────────────────────
--- SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';
--- SELECT * FROM pg_publication_tables WHERE pubname = 'supabase_realtime';
+DROP TRIGGER IF EXISTS trg_utt_notify ON public."Unified_Ticket_Tracker";
+CREATE TRIGGER trg_utt_notify
+AFTER INSERT ON public."Unified_Ticket_Tracker"
+FOR EACH ROW EXECUTE FUNCTION notify_utt_change();
+

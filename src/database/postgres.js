@@ -687,20 +687,140 @@ export async function markIntakeSlaConfirmFlag(intakeId, level) {
   }
 }
 
-// Konfirmasi intake menjadi tiket dari Teams/Telegram
-export async function confirmIntakeAsTicket(intakeId, confirmedBy = "Teams User") {
-  try {
-    const intake = await getRawIntakeMessageById(intakeId);
-    if (!intake) return { success: false, error: "Intake ID tidak ditemukan." };
+// Helper resolusi pesan intake: bisa berdasarkan ID numerik, urutan daftar (list_index), nama pengirim, atau kata kunci subjek/isi
+export async function resolveIntakeMessage(target) {
+  let intakeId = null;
+  let listIndex = null;
+  let searchQuery = null;
 
+  if (typeof target === "object" && target !== null) {
+    intakeId = target.intakeId || target.intake_id || null;
+    listIndex = target.listIndex || target.list_index || null;
+    searchQuery = target.searchQuery || target.search_query || null;
+  } else if (typeof target === "number") {
+    intakeId = target;
+  } else if (typeof target === "string") {
+    const trimmed = target.trim();
+    if (/^\d+$/.test(trimmed)) {
+      intakeId = parseInt(trimmed, 10);
+    } else {
+      searchQuery = trimmed;
+    }
+  }
+
+  // 1. Jika ada intakeId langsung
+  if (intakeId) {
+    const intake = await getRawIntakeMessageById(intakeId);
+    if (intake) return intake;
+  }
+
+  // 2. Jika ada nomor urut dari daftar yang baru saja dilihat pengguna (list_index, 1-based)
+  if (listIndex && Number.isInteger(Number(listIndex)) && Number(listIndex) > 0) {
+    const offset = Number(listIndex) - 1;
+    const res = await pgPool.query(
+      `SELECT * FROM public.intake_message 
+       WHERE status = 'pending' 
+       ORDER BY received_at DESC 
+       LIMIT 1 OFFSET $1`,
+      [offset]
+    );
+    if (res.rows.length > 0) return res.rows[0];
+  }
+
+  // 3. Jika ada query pencarian (pengirim, kata kunci subjek, atau 'nomor X')
+  if (searchQuery) {
+    const query = String(searchQuery).trim();
+
+    // Cek apakah query merujuk ke nomor urut pesan, misalnya "nomor 1", "no 1", "pesan ke 2"
+    const numMatch = query.match(/^(?:(?:nomor|no|pesan(?:\s+ke)?)\s*[:#]?\s*)?(\d+)$/i);
+    if (numMatch) {
+      const num = parseInt(numMatch[1], 10);
+      // Coba cari sebagai nomor urut offset 1-based pada pending messages
+      if (num >= 1 && num <= 30) {
+        const resOffset = await pgPool.query(
+          `SELECT * FROM public.intake_message 
+           WHERE status = 'pending' 
+           ORDER BY received_at DESC 
+           LIMIT 1 OFFSET $1`,
+          [num - 1]
+        );
+        if (resOffset.rows.length > 0) return resOffset.rows[0];
+      }
+      // Atau coba sebagai direct ID
+      const intakeById = await getRawIntakeMessageById(num);
+      if (intakeById) return intakeById;
+    }
+
+    // Pencarian berdasarkan teks pada pengirim, isi pesan, subjek (raw_payload), atau source_ref
+    const cleanTerm = query.replace(/[%_\'"]/g, "").trim();
+    const term = `%${cleanTerm}%`;
+
+    // Prioritaskan pesan yang berstatus 'pending'
+    const resPending = await pgPool.query(
+      `SELECT * FROM public.intake_message 
+       WHERE status = 'pending' 
+         AND (sender ILIKE $1 
+              OR body_text ILIKE $1 
+              OR raw_payload::text ILIKE $1 
+              OR source_ref ILIKE $1)
+       ORDER BY received_at DESC 
+       LIMIT 1`,
+      [term]
+    );
+    if (resPending.rows.length > 0) return resPending.rows[0];
+
+    // Jika tidak ada di pending, cari di semua status
+    const resAny = await pgPool.query(
+      `SELECT * FROM public.intake_message 
+       WHERE sender ILIKE $1 
+          OR body_text ILIKE $1 
+          OR raw_payload::text ILIKE $1 
+          OR source_ref ILIKE $1
+       ORDER BY received_at DESC 
+       LIMIT 1`,
+      [term]
+    );
+    if (resAny.rows.length > 0) return resAny.rows[0];
+  }
+
+  return null;
+}
+
+// Konfirmasi intake menjadi tiket dari Teams/Telegram
+export async function confirmIntakeAsTicket(target, confirmedBy = "Teams User") {
+  try {
+    const intake = await resolveIntakeMessage(target);
+    if (!intake) {
+      return { 
+        success: false, 
+        error: "Kandidat pesan masuk tidak ditemukan berdasarkan ID, nomor urut, atau kata kunci pencarian yang diberikan." 
+      };
+    }
+
+    if (intake.status === "processed" && intake.ticket_id) {
+      return {
+        success: true,
+        alreadyProcessed: true,
+        ticketId: intake.ticket_id,
+        message: `Pesan dari ${intake.sender} (ID: ${intake.id}) sudah pernah dikonfirmasi sebelumnya sebagai tiket ${intake.ticket_id}.`
+      };
+    }
+
+    let parsedPayload = {};
+    try {
+      parsedPayload = typeof intake.raw_payload === "string" ? JSON.parse(intake.raw_payload) : (intake.raw_payload || {});
+    } catch {}
+
+    const subject = parsedPayload.subject || intake.body_text?.substring(0, 80) || "(No Subject)";
     const ticketId = await generateTicketId();
+
     const payload = {
       ticket_id: ticketId,
-      email_id: intake.source_ref || `INTAKE-${intakeId}`,
+      email_id: intake.source_ref || `INTAKE-${intake.id}`,
       from: intake.sender || "Unknown",
-      subject: intake.raw_payload?.subject || intake.body_text?.substring(0, 80) || "(No Subject)",
+      subject: subject,
       body: intake.body_text || "",
-      summary: intake.raw_payload?.summary || intake.body_text?.substring(0, 150) || "",
+      summary: parsedPayload.summary || intake.body_text?.substring(0, 180) || "",
       category: "Incident Management",
       priority: "MEDIUM",
       source: intake.source_channel || "email",
@@ -721,8 +841,14 @@ export async function confirmIntakeAsTicket(intakeId, confirmedBy = "Teams User"
       values
     );
 
-    await markRawMessageAs(intakeId, "processed", ticketId);
-    return { success: true, ticketId };
+    await markRawMessageAs(intake.id, "processed", ticketId);
+    return { 
+      success: true, 
+      ticketId, 
+      intakeId: intake.id, 
+      sender: intake.sender, 
+      subject: subject 
+    };
   } catch (err) {
     console.error("❌ Error in confirmIntakeAsTicket:", err.message);
     return { success: false, error: err.message };

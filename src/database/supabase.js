@@ -1,10 +1,10 @@
 // src/database/supabase.js
 // ADAPTER MIGRATION: Seluruh operasi sekarang dialihkan ke PostgreSQL VPS lokal.
 
-import { pgPool, pgEmitter } from "./postgres.js";
+import { pgPool, pgEmitter, confirmIntakeAsTicket, resolveIntakeMessage } from "./postgres.js";
 import { createClickUpTask } from "../infrastructure/clickup/clickupService.js";
 
-export { pgPool, pgEmitter };
+export { pgPool, pgEmitter, confirmIntakeAsTicket, resolveIntakeMessage };
 
 export async function isEmailProcessed(emailId) {
   const res = await pgPool.query(
