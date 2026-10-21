@@ -66,13 +66,12 @@ if (!env.OPENAI_API_KEY && !env.GEMINI_API_KEY) {
   throw new Error("OPENAI_API_KEY atau GEMINI_API_KEY belum di set di file .env");
 }
 
-if (!env.SUPABASE_URL) {
-  throw new Error("SUPABASE_URL belum di set di file .env");
-}
-
-if (!env.SUPABASE_KEY) {
-  throw new Error("SUPABASE_KEY belum di set di file .env");
-}
+// Supabase environment variables (opsional, sistem kini menggunakan PostgreSQL lokal)
+env.PG_HOST = process.env.PG_HOST || "127.0.0.1";
+env.PG_PORT = process.env.PG_PORT || "5432";
+env.PG_DATABASE = process.env.PG_DATABASE || "ticket_tracker";
+env.PG_USER = process.env.PG_USER || "dbuser";
+env.PG_PASSWORD = process.env.PG_PASSWORD || "UTT@PantauTiket";
 
 if (!env.ALLOWED_TELEGRAM_GROUPS) {
   console.warn("ALLOWED_TELEGRAM_GROUPS belum di set di file .env. Bot akan merespon dari semua grup.");

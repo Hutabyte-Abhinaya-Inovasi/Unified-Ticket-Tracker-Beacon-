@@ -97,32 +97,20 @@ async function processPendingIntakesOnStartup() {
   }
 }
 
+import { pgEmitter } from "../database/supabase.js";
+
 export function startIntakeMessageListener() {
-  console.log("📡 Listening raw_intake_messages...");
+  console.log("📡 Listening raw_intake_messages via Postgres Realtime...");
 
   // Proses intake pending dari database saat pertama kali menyala
   processPendingIntakesOnStartup().catch(() => {});
 
-  supabase
-    .channel("intake_message")
-    .on(
-      "postgres_changes",
-      {
-        event: "INSERT",
-        schema: "public",
-        table: "intake_message"
-      },
-      async (payload) => {
-        try {
-          const raw = payload.new;
-          console.log("📥 Raw Intake Baru:", raw.id);
-          await safeSendCandidate(raw);
-        } catch (err) {
-          console.error("❌ Error processing new intake insert:", err.message);
-        }
-      }
-    )
-    .subscribe((status) => {
-      console.log("Realtime Status:", status);
-    });
+  pgEmitter.on("intake_message:insert", async (raw) => {
+    try {
+      console.log("📥 Raw Intake Baru (Postgres):", raw.id);
+      await safeSendCandidate(raw);
+    } catch (err) {
+      console.error("❌ Error processing new intake insert:", err.message);
+    }
+  });
 }
