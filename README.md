@@ -910,6 +910,8 @@ SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 AI_PROVIDER=openai
 OPENAI_API_KEY=your-openai-api-key
 OPENAI_MODEL=gpt-4o-mini
+# Untuk Gemini, gunakan AI_PROVIDER=gemini dan GEMINI_API_KEY.
+# GEMINI_MODEL bersifat opsional (default: gemini-2.5-flash).
 
 # Telegram
 TELEGRAM_BOT_TOKEN=your-telegram-bot-token

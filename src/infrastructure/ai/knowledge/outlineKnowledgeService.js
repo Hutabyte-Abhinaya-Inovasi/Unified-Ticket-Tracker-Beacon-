@@ -703,6 +703,7 @@ export async function retrieveOutlineKnowledge(input, options = {}) {
       count: 0,
       documents: [],
       catalog_size: catalogResult.catalogSize,
+      catalog_error: catalogResult.catalogError,
       llm_rerank: catalogResult.llmRerank,
       search_failures: searchFailures,
       partial_failures: [],
@@ -757,7 +758,14 @@ export async function retrieveOutlineKnowledge(input, options = {}) {
       return;
     }
 
-    if (!document.content) return;
+    if (!document.content) {
+      partialFailures.push({
+        id: document.id,
+        title: document.title,
+        error: "Dokumen Outline tidak memiliki konten yang dapat digunakan.",
+      });
+      return;
+    }
 
     const remaining = maxTotalChars - totalChars;
     if (remaining <= 0) return;
@@ -800,6 +808,7 @@ export async function retrieveOutlineKnowledge(input, options = {}) {
     count: documents.length,
     documents,
     catalog_size: catalogResult.catalogSize,
+    catalog_error: catalogResult.catalogError,
     llm_rerank: catalogResult.llmRerank,
     search_failures: searchFailures,
     partial_failures: partialFailures,

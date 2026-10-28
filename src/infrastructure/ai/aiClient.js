@@ -3,15 +3,33 @@
 import OpenAI from "openai";
 import { env } from "../../config/env.js";
 
-const isGemini = !!env.GEMINI_API_KEY;
+const configuredProvider = String(env.AI_PROVIDER || "").trim().toLowerCase();
+
+if (configuredProvider && !["openai", "gemini"].includes(configuredProvider)) {
+  throw new Error('AI_PROVIDER harus bernilai "openai" atau "gemini".');
+}
+
+export const AI_PROVIDER =
+  configuredProvider || (env.GEMINI_API_KEY ? "gemini" : "openai");
+const isGemini = AI_PROVIDER === "gemini";
+const apiKey = isGemini ? env.GEMINI_API_KEY : env.OPENAI_API_KEY;
+
+if (!apiKey) {
+  throw new Error(
+    `${isGemini ? "GEMINI_API_KEY" : "OPENAI_API_KEY"} belum dikonfigurasi untuk AI_PROVIDER=${AI_PROVIDER}.`
+  );
+}
 
 export const client = new OpenAI({
-  apiKey: env.GEMINI_API_KEY || env.OPENAI_API_KEY,
+  apiKey,
   baseURL: isGemini ? "https://generativelanguage.googleapis.com/v1beta/openai/" : undefined,
 });
 
-// Model untuk chat completion
-export const AI_MODEL = isGemini ? "gemini-2.5-flash" : "gpt-4o-mini";
+export const AI_MODEL = isGemini
+  ? env.GEMINI_MODEL || "gemini-2.5-flash"
+  : env.OPENAI_MODEL || "gpt-4o-mini";
+
+console.log(`🤖 AI provider aktif: ${AI_PROVIDER} (${AI_MODEL})`);
 
 const MAX_RETRY = 5;
 

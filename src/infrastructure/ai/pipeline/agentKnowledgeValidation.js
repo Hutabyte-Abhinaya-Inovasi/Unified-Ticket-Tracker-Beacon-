@@ -37,8 +37,22 @@ export function runKnowledgeValidation(toolName, args, rawResult) {
   }
 
   const documents = Array.isArray(rawResult.documents) ? rawResult.documents : [];
+  const searchFailures = Array.isArray(rawResult.search_failures)
+    ? rawResult.search_failures
+    : [];
+  const partialFailures = Array.isArray(rawResult.partial_failures)
+    ? rawResult.partial_failures
+    : [];
+
   if (!isError && documents.length === 0) {
-    isEmpty = true;
+    if (rawResult.catalog_error || partialFailures.length > 0) {
+      isError = true;
+      issues.push(
+        "Retrieval Outline gagal atau tidak lengkap; hasil kosong tidak dapat dianggap sebagai tidak adanya knowledge."
+      );
+    } else {
+      isEmpty = true;
+    }
   }
 
   documents.forEach((document, index) => {
@@ -57,9 +71,9 @@ export function runKnowledgeValidation(toolName, args, rawResult) {
     isError,
     documentCount: documents.length,
     issues,
-    partialFailures: Array.isArray(rawResult.partial_failures)
-      ? rawResult.partial_failures
-      : [],
+    partialFailures,
+    searchFailures,
+    catalogError: rawResult.catalog_error || null,
     query: args?.query || rawResult.query || null,
   };
 }

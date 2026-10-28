@@ -30,6 +30,8 @@ export function buildKnowledgeContext(toolName, args, rawResult, validationResul
         issues: validationResult.issues,
         document_count: validationResult.documentCount,
         partial_failures: validationResult.partialFailures,
+        search_failures: validationResult.searchFailures,
+        catalog_error: validationResult.catalogError,
       },
     },
     guidance_for_main_model: guidance,
