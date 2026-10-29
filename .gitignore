@@ -8,6 +8,11 @@ yarn-error.log*
 dist/
 build/
 
+# Database dumps & migration files
+*.sql
+*.sql.gz
+migration_bundle.tar.gz
+
 # Environment
 .env
 .env.local
